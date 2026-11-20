@@ -89,6 +89,7 @@ S1（2026-11-21）定稿了 `Agent`、`SessionStore`、`Runner`、`RunResult` �
 @dataclass(frozen=True, kw_only=True)
 class Agent:
     role: str                                   # a lite-model role; never a model id
+    fallback_role: str | None = None            # S2c: another role, once per run after CallFailed
     model: AsyncToolModel                       # lite_model.AsyncToolModel (AsyncFakeModel in tests)
     system: str = ""
     tools: Sequence[Tool] = ()                  # kept as a tuple; names must be unique
@@ -98,7 +99,8 @@ class Agent:
     clock: Callable[[], datetime] = ...         # event times
     ids: Callable[[], str] = ...                # session and run ids
     gates: Sequence[Gate] = ()                  # S2b: asked in order before a tool runs (§8)
-    # S2c: done, fallback_role     S3: skills, memory, compaction
+    done: Callable[[Sequence[Event]], str | None] | None = None   # S2c: None = done; text = still open
+    # S3: skills, memory, compaction
 
     async def run(self, task: str, *, session_id: str | None = None) -> RunResult: ...
     async def resume(self, session_id: str, input: Resume | None = None) -> RunResult: ...   # S2b
@@ -114,7 +116,7 @@ class RunResult:
     error: RunError | None      # kind: model | store | harness; the exception's type name, never upstream text
     usage: Usage                # this run's model calls, summed; an unknown part stays None
     pause: Pause | None = None  # S2b: set exactly when outcome is "paused"
-    # S2c: switched: bool
+    switched: bool = False      # S2c: this run moved to fallback_role
 
 @dataclass(frozen=True)
 class Waiting:                  # S2b: one call a paused run waits on
@@ -257,19 +259,24 @@ class Runner(Protocol):                         # where the loop's steps execute
 
 1. **被长度上限截断的一轮不执行任何 tool call**，但每个 call 都写一条错误 `tool_result`（"输出被截断，参数
    可能不完整，请重发"），然后继续（KB §11.1）。这一轮计入 usage 和 turn 预算。被截断的一轮只有文本、没有
-   call 时没有东西可回，run 以 `failed`、`stop=truncated` 结束，`text` 是已有的那部分（S1；S2 的 auto-continue
-   可以改成续写）。
+   call 时没有东西可回，run 以 `failed`、`stop=truncated` 结束，`text` 是已有的那部分（S1；S2c 起先续写，见规则 3）。
 2. **一批 tool 结果全部是 terminal 才结束**；只要有一个普通结果，就再给模型一轮（KB §11.2）。
-3. **纯文本的 `end_turn` 不等于完成**（KB §11.4）：宿主给了完成条件（checklist tool 或 `done` 谓词）且未满足
-   时，写一条 `origin=auto_continue` 的 `user_message` 点名未完成项，最多 `budget.auto_continues` 次
-   （默认 2）。没给完成条件时，纯文本即结束——简单用法不需要这一条。
+3. **纯文本的 `end_turn` 不等于完成**（KB §11.4；S2c）：宿主给了完成条件 `Agent(done=…)` 时，每个纯文本的轮次
+   问它一次——它拿到包含这一轮在内的整条 log，返回 `None` 表示做完了，返回文字表示还有什么没做。这一轮和它
+   后面的那条事件（发回去的消息，或 run 的结束）在同一批里写入：中间不会留下"看起来结束了、其实没做完"的状态。有没做完的，就把
+   那段文字作为 `origin=auto_continue` 的 `user_message` 发回去，每次 run 最多 `budget.auto_continues` 次
+   （默认 2）；用完还没做完，run 以 `failed`、`stop=incomplete` 结束，等人来看。没给 `done` 时纯文本即结束。
+   以 terminal tool 结束的 run 不问 `done`。`done` 返回空字符串等同于 `None`。`done` 是宿主的同步代码：它抛的
+   异常原样抛出（和宿主的其它 bug 一样，不吞），耗时的检查会占住 event loop——要做 I/O 的完成条件等 S7 的
+   durable runner 再给它一个 activity 的位置。`Budget(auto_continues=0)` 同时关掉截断续写。**被截断的纯文本**也走这条路：追加一条"接着写"的消息继续，占用
+   同一个次数上限，用完才是 `stop=truncated`。
 4. **快照按 run 取**：`run()` / `resume()` 开始时把 role、`fallback_role`、system、tool 定义写进
    `run_started`，本次 run 的每一轮都从它取（§4）。KB §11.3 说的是每一轮取一次；这里收紧到每个 run 一次，
    换来"请求可以从 log 完整还原"。run 中途要改 system 或 tool，就结束这次 run 再开一次。
    建议一个 session 里 system 和 tools 一直不变：改了是允许的，但之前的 thinking block 不再进投影（§4），
    prompt cache 也从头开始。
 5. **运行中到达的输入**分两个队列：steering 在两轮之间注入，follow-up 在即将停止时读取并重启 loop
-   （KB §11.3）。S2 只做 steering 的接口，follow-up 随 long agent 做。
+   （KB §11.3）。两者都是给 long agent 用的，现在没有调用方；随 S7 一起设计（2026-11-21 从 S2 移出）。
 6. **预算包含失败和重试**：每次模型调用（包括 lite-model 抛错的、做压缩的）都写事件、计 usage；下一次
    调用会超出预算时在调用前停，`outcome=failed`、`stop=budget_*`（任务没做完，不算 completed；KB §7.2）。`turns`、`tokens`、`cost_usd` 按**整个
    session** 算，每次从 log 合计（暂停再恢复不会得到一份新预算；fork 出来的 session 包含继承的前缀）。
@@ -295,8 +302,9 @@ class Runner(Protocol):                         # where the loop's steps execute
 11. **换模型续跑（可选，默认关）**：`Agent(fallback_role=...)`。
     - 只在 `CallFailed`（超时、连接、5xx、429，重试已用尽）时触发。`Truncated`、空回复、拒答、tool 参数
       不合法都**不**触发：那是质量问题，换模型会把它盖住。
-    - 顺序：写 `model_error` → 写 `model_switched`（from / to role、原因）→ 用 `fallback_role` 重发这一轮。
-      fallback 也 `CallFailed` 就按规则 9 失败。一次 run 最多换一次。
+    - 顺序：`model_error` 和 `model_switched`（from / to role、原因）在同一批里写入 → 用 `fallback_role` 重发
+      这一轮（请求完全相同）。fallback 也 `CallFailed` 就按规则 9 失败。一次 run 最多换一次。`model_turn` 和
+      `model_error` 都记下实际用的 role。
     - **用哪个 role 完全由 log 决定**：当前 run（最近一条 `run_started` 之后）里有 `model_switched` 就用
       fallback，否则用主 role。换了之后本次 run 不换回去（来回切换会反复丢 prompt cache）。
     - 每次 `run()` / `resume()` 都写新的 `run_started`，所以新 run 从主 role 开始。进程在 `model_error`
@@ -644,6 +652,37 @@ docs/lite-agent-design.md
     等审批的 call 可能因为 gate 换了而被执行（现在等待状态取自 log）。否决——"store 提交了但调用方看到失败时
     重交结果会被拒"（这是 store 的原子性契约，`check_batch` 之外不在 loop 里兜底）。不改——宿主交回的结果同样按
     预算截断（log 里存的就是模型看到的，§4）。没有跑第二轮 Codex。
+- **S2c（2026-11-21）**：`Agent.done`（auto-continue）、被截断的纯文本续写、`Agent.fallback_role`、事件
+  `model_switched`、`user_message.origin=auto_continue`、`stop=incomplete`、`RunResult.switched`。本次 run 做过什么
+  （是否已切换、已经续了几次）都从 log 里读：本次 run 的 `run_started` 之后的事件。不靠 `run_id`，所以宿主的 id
+  工厂重复给出同一个 run id 也不会串。测试先写（`tests/unit/test_continue_fallback.py`）；另做逐行
+  破坏 16 处，15 处变红，剩下 1 处（`model_error` 和 `model_switched` 是否同一批写入）不改变可观察的行为。
+  - 改了一条已有测试：`test_cut_off_text_with_no_calls_ends_the_run_as_truncated` 测的是 S1"截断的纯文本直接结束"，
+    S2c 按计划改成先续写，这条测试现在显式用 `auto_continues=0` 来测"不续写时的结局"。
+  - steering（§5 规则 5）按计划移到"按需"，随 S7 设计。
+  - 规则 → 测试：规则 3 `test_an_unfinished_task_is_sent_back_with_what_is_still_open`、
+    `test_automatic_continuation_stops_after_the_budgets_count`、`test_each_run_gets_its_own_continuations`、
+    `test_text_cut_off_at_the_limit_is_asked_to_continue`、`test_cut_off_text_and_unfinished_tasks_share_one_allowance`；
+    规则 9、11 `test_a_failed_call_switches_to_the_fallback_role_once_and_says_so`、
+    `test_a_fallback_that_fails_too_ends_the_run_without_a_second_switch`、
+    `test_only_an_unreachable_model_triggers_the_switch`、`test_the_next_run_starts_on_the_primary_role_again`、
+    `test_a_resume_after_a_switched_run_paused_starts_on_the_primary_role`、
+    `test_a_run_interrupted_around_a_switch_resumes_on_the_primary_role`、
+    `test_the_failed_call_and_the_fallbacks_calls_all_count_against_the_budget`。
+  - S2b 合并后的安全检查（自动）：`resume()` 的批准可以用在从没被 gate 拦过的 call 上，从而绕过 gate。成立，已修：
+    只接受对 log 里记录为在等审批的 call 的批准（`test_an_approval_is_only_taken_for_a_call_a_gate_left_waiting`，
+    先红后绿）。
+  - `/simplify`（一路，四个角度）：采纳——纯文本分支改成一个"还剩什么"的值加三个出口；`RunResult` 的后两个字段
+    用关键字传；`done` 返回空或空白等同于完成（原来会发一条空消息给模型，回归测试先红）。留到 S7——`loop()` 按
+    activity 的边界再拆；`done` 是同步的宿主代码，要做 I/O 时需要一个 activity 的位置。
+  - Codex 只读 review：1 High、4 Medium、1 Low，另有测试缺口。修复（回归测试先红）——本次 run 的状态按 `run_id`
+    划分，宿主重复使用 run id 时上一次 run 的切换和续跑次数会串到下一次（High；改成按位置）；纯文本的轮次和它
+    后面的那条事件（续跑消息或 `run_finished`）分两次写，中间崩溃会留下一个看起来已结束、其实没做完、又无法恢复
+    的 session（改成同一批写入，`_Run.stamp` / `write`）；`done` 返回非字符串时在写入任何事件之前抛 `TypeError`；
+    `run_started` 的快照补上 `fallback_role`（设计早就这么写了）。补测试——切换之后没有预算再调 fallback。否决——
+    "续跑次数用完后可以靠反复 `resume()` 无限续"：它假设 log 以续跑消息结尾，实际用完时写的是 `model_turn` 和
+    `run_finished`，`resume()` 会拒绝（"nothing to resume"）；要继续只能 `run()` 一个新任务，而 turn / token 预算
+    是按 session 算的。没有跑第二轮 Codex。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 

@@ -205,7 +205,7 @@ async def test_a_truncated_turn_runs_no_tool_answers_every_call_and_the_loop_goe
 
 async def test_cut_off_text_with_no_calls_ends_the_run_as_truncated() -> None:
     model = AsyncFakeModel(agent=[(say("The answer is"), "length")])
-    a = agent(model)
+    a = agent(model, budget=Budget(auto_continues=0))  # S2c: with an allowance it is asked to go on
     result = await a.run("Explain.")
     assert (result.outcome, result.stop, result.text) == ("failed", "truncated", "The answer is")
     assert kinds(await events_of(a, "id1"))[-2:] == ["model_turn", "run_finished"]

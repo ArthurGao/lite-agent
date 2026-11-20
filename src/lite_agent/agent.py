@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from lite_model import AsyncToolModel
 
 from lite_agent.budget import Budget
+from lite_agent.events import Event
 from lite_agent.gates import Gate
 from lite_agent.result import Resume, RunResult
 from lite_agent.runner import InProcessRunner, Runner
@@ -23,10 +24,17 @@ def _now() -> datetime:
 @dataclass(frozen=True, kw_only=True)
 class Agent:
     role: str  # a lite-model role; never a model id
+    # Another role, used once per run after the model behind `role` could not be reached
+    # (design §5 rule 11). Off unless named; `model` must serve both roles.
+    fallback_role: str | None = None
     model: AsyncToolModel
     system: str = ""
     tools: Sequence[Tool] = ()
     gates: Sequence[Gate] = ()  # asked in order before a tool runs (design §8)
+    # How to tell the task is done (design §5 rule 3): given the session's log after a text-only
+    # turn, return None when it is, or what is still open, which is sent back to the model.
+    # Without it a text-only turn ends the run.
+    done: Callable[[Sequence[Event]], str | None] | None = None
     sessions: SessionStore = field(default_factory=InMemorySessionStore)
     budget: Budget = field(default_factory=Budget)
     runner: Runner = field(default_factory=InProcessRunner)
@@ -36,6 +44,8 @@ class Agent:
     def __post_init__(self) -> None:
         if not self.role:
             raise ValueError("Agent.role must name a lite-model role")
+        if self.fallback_role is not None and self.fallback_role in ("", self.role):
+            raise ValueError("Agent.fallback_role must name another lite-model role")
         object.__setattr__(self, "tools", tuple(self.tools))
         names = [t.name for t in self.tools]
         repeated = sorted({n for n in names if names.count(n) > 1})

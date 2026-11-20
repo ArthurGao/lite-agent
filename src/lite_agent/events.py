@@ -23,6 +23,7 @@ StopReason = Literal[
     "budget_tokens",
     "budget_cost",
     "truncated",
+    "incomplete",
     "paused",
     "error",
 ]
@@ -129,6 +130,7 @@ class RunStarted(_Event):
 
     type: Literal["run_started"] = "run_started"
     role: str
+    fallback_role: str | None = None
     system: str
     tools: tuple[ToolDef, ...]
 
@@ -136,7 +138,9 @@ class RunStarted(_Event):
 class UserMessage(_Event):
     type: Literal["user_message"] = "user_message"
     text: str
-    origin: Literal["task"] = "task"
+    # task: what the caller asked.  auto_continue: the harness, after a text-only or cut-off
+    # turn, saying what is still open (design §5 rule 3).
+    origin: Literal["task", "auto_continue"] = "task"
 
 
 class ModelTurn(_Event):
@@ -201,6 +205,15 @@ class ModelErrorEvent(_Event):
     usage: UsageData | None  # None: nothing came back, so nothing is known
 
 
+class ModelSwitched(_Event):
+    """From here to the end of this run the calls go to another role (design §5 rule 11)."""
+
+    type: Literal["model_switched"] = "model_switched"
+    from_role: str
+    to_role: str
+    reason: str  # the error that caused it, by type name
+
+
 class RunFinished(_Event):
     type: Literal["run_finished"] = "run_finished"
     outcome: Outcome
@@ -218,6 +231,7 @@ Event = Annotated[
     | Paused
     | Resumed
     | ModelErrorEvent
+    | ModelSwitched
     | RunFinished,
     Field(discriminator="type"),
 ]

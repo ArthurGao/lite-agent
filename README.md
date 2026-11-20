@@ -1,12 +1,13 @@
 # lite-agent
 
-**Status: S2b** (stage plan: design §15). The core runs: a tool loop over a
+**Status: S2** (stage plan: design §15). The core runs: a tool loop over a
 [lite-model](https://github.com/ArthurGao/lite-model) role, every step recorded in an append-only
 event log, and each request derived from that log. Tool arguments are validated, results are cut to
 a budget, and turn, token and cost budgets stop a session. Gates can refuse a call or stop for a person's
 approval, a run can pause for a tool the host executes, and `resume()` picks a paused or interrupted
-session up from its log. Sessions live in memory only; compaction and a persistent store are later
-stages. Not released yet.
+session up from its log. A completion condition can send an unfinished task back to
+the model, and a fallback role takes over, visibly and once per run, when a model cannot be reached.
+Sessions live in memory only; compaction and a persistent store are later stages. Not released yet.
 
 ```python
 import asyncio
