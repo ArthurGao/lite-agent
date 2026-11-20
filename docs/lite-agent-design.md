@@ -1,6 +1,6 @@
 # lite-agent 设计文档
 
-**状态：设计草稿（2026-11-20），未开始实现。S0 完成（2026-11-21，骨架，只在本地，尚无远端仓库）。P0：lite-model v0.4.0（`turn()`）。下一步 S1。**
+**状态：S1 完成（2026-11-21）：事件、内存 store、投影、loop、`Agent.run`。P0 是 lite-model v0.4.0 的 `turn()`。仓库 2026-11-21 起公开在 github.com/ArthurGao/lite-agent。下一步 S2。**
 与代码冲突时，在同一次改动里更新本文，并在 commit 里说明原因。
 
 ## 0. 决策记录
@@ -82,63 +82,65 @@ PostgreSQL、MCP、lite-mem、lite-rag、Temporal、FastAPI 各是一个 extra�
 
 ## 3. 接口
 
-名字是草案，S1 定稿。
+S1（2026-11-21）定稿了 `Agent`、`SessionStore`、`Runner`、`RunResult` 和 `Tool` 的最小形状。标了阶段的是之后
+要加的部分：都是新增的可选项，不改已有的。
 
 ```python
+@dataclass(frozen=True, kw_only=True)
 class Agent:
-    def __init__(
-        self,
-        *,
-        role: str,                              # a lite-model role; never a model id
-        fallback_role: str | None = None,       # another role, used once after CallFailed (§5 rule 11)
-        model: AsyncModel,                      # lite_model.AsyncModel (FakeModel in tests)
-        system: str | SystemPrompt = "",
-        tools: Sequence[Tool] = (),
-        sessions: SessionStore | None = None,   # default: InMemorySessionStore
-        skills: SkillSource | None = None,
-        memory: Memory | None = None,
-        compaction: Compactor | None = None,
-        budget: Budget = Budget(),
-        gates: Sequence[Gate] = (),
-    ) -> None: ...
+    role: str                                   # a lite-model role; never a model id
+    model: AsyncToolModel                       # lite_model.AsyncToolModel (AsyncFakeModel in tests)
+    system: str = ""
+    tools: Sequence[Tool] = ()                  # kept as a tuple; names must be unique
+    sessions: SessionStore = InMemorySessionStore()   # one per agent by default
+    budget: Budget = Budget()
+    runner: Runner = InProcessRunner()
+    clock: Callable[[], datetime] = ...         # event times
+    ids: Callable[[], str] = ...                # session and run ids
+    # S2: fallback_role, gates     S3: skills, memory, compaction
 
     async def run(self, task: str, *, session_id: str | None = None) -> RunResult: ...
-    async def resume(self, session_id: str, input: ResumeInput | None = None) -> RunResult: ...
     def run_sync(self, task: str, *, session_id: str | None = None) -> RunResult: ...
+    # S2: async def resume(self, session_id: str, input: ResumeInput | None = None) -> RunResult
 
 @dataclass(frozen=True)
 class RunResult:
     session_id: str
+    run_id: str
     outcome: Literal["completed", "failed", "paused"]
-    text: str | None            # the final assistant text, when completed
-    pause: Pause | None         # why it paused and what it waits for
-    error: RunError | None
-    usage: Usage                # summed over every model call of this run, failed ones included
-    switched: bool              # the run moved to fallback_role (per-model usage is in the log)
-    stop: StopReason            # end_turn | terminal_tool | budget_turns | budget_tokens | gate | error | ...
+    stop: StopReason            # end_turn | terminal_tool | budget_turns | truncated | error   (S2 adds more)
+    text: str | None            # the last assistant text, when there is one
+    error: RunError | None      # kind: model | store | harness; the exception's type name, never upstream text
+    usage: Usage                # this run's model calls, summed; an unknown part stays None
+    # S2: pause: Pause | None, switched: bool
 
 class SessionStore(Protocol):
     async def append(self, session_id: str, events: Sequence[Event], *, expected_seq: int) -> None: ...
     async def read(self, session_id: str, *, upto_seq: int | None = None) -> Sequence[Event]: ...
     async def fork(self, session_id: str, *, at_seq: int) -> str: ...
 
-class Tool(Protocol):
+class Tool(Protocol):                           # all four are read-only properties
     name: str
     description: str
-    input_schema: type[BaseModel]
-    terminal: bool                              # a result that may end the run (§5 rule 2)
-    idempotent: bool                            # safe to run again with the same call_id (§8)
-    timeout_s: float | None                     # None = Budget.tool_timeout_s
-    async def __call__(self, args: BaseModel, ctx: ToolContext) -> ToolOutput: ...
+    parameters: Mapping[str, Any]               # JSON Schema of the input, sent to the model as is
+    terminal: bool                              # a successful result may end the run (§5 rule 2)
+    async def __call__(self, args: Mapping[str, Any], ctx: ToolContext) -> str: ...
+    # S2: idempotent, timeout_s, external; `@tool` validates args against a Pydantic model
 
-class Gate(Protocol):                           # runs before a tool call executes
+class Gate(Protocol):                           # S2: runs before a tool call executes
     name: str
     async def check(self, call: ToolCall, ctx: RunContext) -> Allow | Deny | PauseFor: ...
 
 class Runner(Protocol):                         # where the loop's steps execute
-    async def run(self, agent: Agent, session_id: str) -> RunResult: ...
+    async def run(self, agent: Agent, session_id: str | None, task: str) -> RunResult: ...
 ```
 
+- `run(task)` 开一个新 session；`run(task, session_id=…)` 是那个 session 的下一次 run（多轮对话），不存在的
+  session 抛 `UnknownSession`。`Runner.run` 的 `session_id=None` 表示新 session。
+- `Tool` 用 JSON Schema 字典而不是 Pydantic 模型：loop 只需要把定义交给模型、把参数交给函数。S2 的 `@tool`
+  从 Pydantic 模型生成这个字典并在调用前校验。`FunctionTool` 是包一个 async 函数的实现。
+- `RunResult.error`：run 自己的失败。模型调用失败是 `model`（log 里有 `model_error`）；store 读写失败是 `store`、
+  投影不变量不成立是 `harness`，这两种不再写 log（§4）。不是 `ModelError` 的异常（宿主或测试的 bug）原样抛出。
 - `@tool` 装饰器把一个带类型标注的函数变成 `Tool`（schema 来自参数的 Pydantic 模型）。
 - 配置放数据，初始化参数放代码对象（§11）。
 - 能力在构造 `Agent` 时注入，构造后不可变；要换实现就构造一个新的 `Agent`（session 在 store 里，不受影响）。
@@ -151,13 +153,16 @@ class Runner(Protocol):                         # where the loop's steps execute
 **规则（KB §9）：event log 只追加，是事实来源；发给模型的 messages 每一轮由 log 纯投影得出，从不单独保存、
 从不原地修改。**
 
-信封：`session_id`、`seq`（单调，从 1 起）、`time`、`run_id`、`type`、`data`、`v`（事件词汇表版本）。
+信封：`session_id`、`seq`（单调，从 1 起）、`time`、`run_id`、`type`、`v`（事件词汇表版本，现在是 1）；各类型自己的
+字段平铺在事件上。事件是 frozen 的 Pydantic 模型，`dump()` / `load()` 做 JSON 往返；`load()` 拒绝未知的 `type`、
+多余的字段和更新的 `v`。S1 实现了下表里的 8 种：`session_started`、`run_started`、`user_message`、`model_turn`、
+`tool_started`、`tool_result`、`model_error`、`run_finished`；其余在用到它的阶段加。
 
 | type | data | 模型可见 |
 | --- | --- | --- |
-| `session_started` | 创建时间、fork 来源（`parent_session_id`、`at_seq`） | 否 |
+| `session_started` | session 的第一条事件；它的 `run_id` 是开这个 session 的那次 run。fork 的血缘怎么表示（事件还是 store 的元数据）在 S4 定，S1 的内存 store 记在元数据里 | 否 |
 | `run_started` | `run_id`、触发方式（run / resume）、**本次 run 的快照**：主 role、`fallback_role`、system prompt 原文、每个 tool 的完整定义（名字、描述、JSON schema） | system 和 tools |
-| `user_message` | 文本；`origin`：task / steering / follow_up / auto_continue / resume | 是 |
+| `user_message` | 文本；`origin`：task（S1）；steering / follow_up / auto_continue / resume 在 S2 加 | 是 |
 | `model_turn` | lite-model 的 `AssistantTurn.blocks`，按端点给的顺序原样保存（`Text`、`ToolCall`、`Opaque`——Anthropic 的 thinking block）；`stop`、role、provenance、usage | 是 |
 | `tool_started` | `call_id`、tool 名、参数、`external`；过了校验和 gate、在执行（或交给宿主执行）**之前**写。校验失败、`Deny`、`PauseFor` 都不写它（§8） | 否 |
 | `tool_result` | `call_id`、内容（已截断）、`is_error`、`error_kind`（`invalid_args` / `denied` / `exception` / `timeout` / `truncated_turn` / `outcome_unknown`）、`executed`（tool 是否被调用过）、`origin`（`executed` / `external` / `reconciled`）、`terminal`、原始长度 | 是 |
@@ -181,10 +186,13 @@ class Runner(Protocol):                         # where the loop's steps execute
   "preserved thinking"）。只追加的历史不受影响。所以投影丢掉这样的 `Opaque`：它所在的 `model_turn` 早于
   最近一条 `compaction`，或早于最近一条 system / tools 快照与上一条不同的 `run_started`。这条规则只看 log，
   投影仍然是纯的；文本和 tool call 照常保留。代价是模型失去那之前的思考内容，摘要是它对那段工作的全部了解。
+  规则有意保守：快照 A → B → A 之后，A 时期的 `Opaque` 也不再进投影（它们其实仍然有效），换来规则只有一条、
+  永远不会发出失效的 block。
 - **system 和 tools 也来自 log**：投影取最近一条 `run_started` 的快照。一次 run 之内它们不变；宿主换了
   `Agent` 的配置再 `resume`，新的 `run_started` 记下新的快照，回放时每个请求都能按它所属的 run 还原。
-- **不变量**：每次真实请求前断言 "交给 lite-model 的 messages 和 tools == log 的投影"，不等就失败。它
-  比较的是规范表示；后端实际发出的请求体由 lite-model 的契约测试保证。
+- **不变量**：每次真实请求前断言 "交给 lite-model 的 messages 和 tools == log 的投影"，不等就失败。实现：
+  loop 手里有一份自己追加过的事件，请求由它投影得出；发之前从 store 重新读一遍并投影，两者必须相等，否则
+  `HarnessError`、不发请求（store 丢了或改了事件时在这里被抓住）。它比较的是规范表示；后端实际发出的请求体由 lite-model 的契约测试保证。
 - **压缩只做遮盖**：`compaction` 事件记下它覆盖哪些 seq，原事件留在 log 里；投影时用摘要替代那个区间。
 - **fork**：新 session 记 `(parent_session_id, at_seq)`，不复制事件。读子 session = 父 session 里
   `seq ≤ at_seq` 的事件，接上子 session 自己的事件；子 session 的 seq 从 `at_seq + 1` 起，存在自己名下。
@@ -199,7 +207,9 @@ class Runner(Protocol):                         # where the loop's steps execute
 ## 5. Loop 规则
 
 1. **被长度上限截断的一轮不执行任何 tool call**，但每个 call 都写一条错误 `tool_result`（"输出被截断，参数
-   可能不完整，请重发"），然后继续（KB §11.1）。这一轮计入 usage 和 turn 预算。
+   可能不完整，请重发"），然后继续（KB §11.1）。这一轮计入 usage 和 turn 预算。被截断的一轮只有文本、没有
+   call 时没有东西可回，run 以 `failed`、`stop=truncated` 结束，`text` 是已有的那部分（S1；S2 的 auto-continue
+   可以改成续写）。
 2. **一批 tool 结果全部是 terminal 才结束**；只要有一个普通结果，就再给模型一轮（KB §11.2）。
 3. **纯文本的 `end_turn` 不等于完成**（KB §11.4）：宿主给了完成条件（checklist tool 或 `done` 谓词）且未满足
    时，写一条 `origin=auto_continue` 的 `user_message` 点名未完成项，最多 `budget.auto_continues` 次
@@ -212,7 +222,7 @@ class Runner(Protocol):                         # where the loop's steps execute
 5. **运行中到达的输入**分两个队列：steering 在两轮之间注入，follow-up 在即将停止时读取并重启 loop
    （KB §11.3）。S2 只做 steering 的接口，follow-up 随 long agent 做。
 6. **预算包含失败和重试**：每次模型调用（包括 lite-model 抛错的、做压缩的）都写事件、计 usage；下一次
-   调用会超出预算时在调用前停，`stop=budget_*`（KB §7.2）。`turns`、`tokens`、`cost_usd` 按**整个
+   调用会超出预算时在调用前停，`outcome=failed`、`stop=budget_*`（任务没做完，不算 completed；KB §7.2）。`turns`、`tokens`、`cost_usd` 按**整个
    session** 算，每次从 log 合计（暂停再恢复不会得到一份新预算；fork 出来的 session 包含继承的前缀）。
    `auto_continues` 按 run 算。拿不到 usage 的调用（`CallFailed`）记 `None`、不估算，token 预算里按 0 计，
    turn 预算照算。压缩调用计入 token 和成本，不计入 turn。
@@ -308,6 +318,10 @@ class Runner(Protocol):                         # where the loop's steps execute
       `tool_result`（`origin=reconciled`）写入；核实不了就提交一个 `error_kind=outcome_unknown` 的错误
       结果，让模型知道这一步状态不明。
   - harness 不替宿主保证恰好一次。
+- **S1 的行为**（`resume()` 在 S2）：对一个 session 再 `run()` 时，如果最后一轮有 call 没有结果（上一次 run 在
+  call 和结果之间被打断：崩溃、取消、store 写失败），`run()` 抛 `UnresolvedCalls`（带 call id），不写任何事件、
+  不发请求、不重跑 tool。原因：这样的历史 API 会拒绝，而且可能已经执行过的 tool 不能盲目重跑。S2 用上面的
+  规则逐个处理这些 call，取代这个拒绝。
 
 ## 9. Runner 与 Temporal（S7，可选）
 
@@ -450,14 +464,56 @@ docs/lite-agent-design.md
   - 压缩：不给就不压缩；`SummaryCompactor` 的阈值配置和缺失时的报错；成功 / 失败的事件、怎么计预算（§6）。
   - `append` 的原子性和"回复已拿到但没写进 log"的行为（§4）；事件表补全各字段。
   - 验收补：截断后继续、`CallFailed` 的 usage、切换后暂停恢复、fork 的 fork 加跨 fork 点的压缩（§15）。
-- **S0（2026-11-21）**：`git init`（只在本地；远端仓库等 owner 决定）、pyproject（lite-model v0.4.0 以直接 URL 写进
-  元数据，与 lite-cache 相同）、ruff / mypy strict / pytest + pytest-asyncio、CI 文件（test / package / release，
-  尚未在 GitHub 上跑过）、socket 守卫、`scripts/smoke.py`、README、LICENSE、`.env.example`；workspace `AGENTS.md`
+- **S0（2026-11-21）**：`git init`（当时只在本地；S1 之后 owner 决定公开）、pyproject（lite-model v0.4.0 以直接 URL 写进
+  元数据，与 lite-cache 相同）、ruff / mypy strict / pytest + pytest-asyncio、CI 文件（test / package / release；
+  仓库公开后第一次在 GitHub 上运行，通过）、socket 守卫、`scripts/smoke.py`、README、LICENSE、`.env.example`；workspace `AGENTS.md`
   已更新。检查：ruff、ruff format、mypy 干净，pytest 4 passed（含 review 后加的一条）；最初的三个测试各见过一次红（去掉 socket 守卫；把元数据里
   的 lite-model URL 换成裸名字；对着 lite-model 0.3.0 跑 tool 轮次的测试是 ImportError）；本地按 CI `package` job 的
   步骤从 wheel 装进干净的 venv 并跑通 smoke。没有跑 `/simplify`：这一阶段没有产品代码。
   Codex 只读 review（整个工作区）：2 条，都采纳——socket 守卫补上 UDP `sendto` 和 `getaddrinfo`（回归测试先红）；
   README 开头改成"目标"而不是现状。CI、打包、`.gitignore` 它判为干净。
+- **S1（2026-11-21）**：`events` / `store` / `projection` / `tools` / `budget` / `loop` / `runner` / `agent` /
+  `result` / `errors`。检查：ruff、ruff format、mypy（strict）干净；pytest 全绿。
+  - 与 plan 的出入：没有 `ToolOutput`（tool 直接返回 `str`）；`RunResult` / `RunError` 放在 `result.py`
+    （避免 `agent` ↔ `loop` 循环导入）；多一个 `stop=truncated`（§5 规则 1）；`session_started` 不带 fork 字段（§4）。
+  - 见红的方式：这一阶段的实现写在测试之前（偏离了 TDD），所以用逐行破坏来确认——40 处里 39 处有测试变红；剩下
+    1 处（`Agent` 把 `tools` 复制成 tuple）补了测试后变红。另有 1 处破坏写成了等价改动，不算。
+  - 规则 → 测试（`tests/unit/`）：
+
+    | 规则 | 测试 |
+    | --- | --- |
+    | 基本流程、事件逐条相等 | `test_loop.py::test_two_tool_rounds_then_an_answer_writes_exactly_these_events` |
+    | 请求 = 快照 + 历史 | `test_loop.py::test_each_request_is_the_runs_snapshot_and_the_history_so_far` |
+    | §5 规则 1 | `test_loop.py::test_a_truncated_turn_runs_no_tool_answers_every_call_and_the_loop_goes_on`、`…::test_cut_off_text_with_no_calls_ends_the_run_as_truncated` |
+    | §5 规则 2 | `test_loop.py::test_a_batch_of_only_terminal_results_ends_the_run`、`…::test_a_terminal_result_next_to_a_plain_one_does_not_end_the_run`、`…::test_a_terminal_tool_that_fails_does_not_end_the_run` |
+    | §5 规则 6 | `test_loop.py::test_the_turn_budget_stops_before_the_call_that_would_exceed_it`、`…::test_the_turn_budget_is_the_sessions_not_the_runs`、`…::test_usage_is_summed_over_the_runs_calls_and_recorded`、`…::test_a_failed_call_that_was_billed_counts_and_one_that_never_answered_does_not` |
+    | §5 规则 7 | `test_loop.py::test_a_tool_exception_goes_back_to_the_model_and_the_run_continues`、`…::test_an_unknown_tool_or_unparsed_arguments_is_answered_without_running_anything` |
+    | §5 规则 9（无 fallback） | `test_loop.py::test_a_failed_model_call_ends_the_run_as_failed_and_is_in_the_log`、`…::test_running_again_after_a_failure_resends_the_turn_without_rerunning_tools` |
+    | §4 写入校验、原子性 | `test_store.py::test_a_batch_with_one_bad_event_is_refused_whole`、`…::test_a_stale_expected_seq_is_refused_and_nothing_is_written`、`test_events.py::test_an_invalid_event_cannot_be_built` |
+    | §4 版本、JSON 往返 | `test_events.py::test_an_event_this_code_cannot_vouch_for_is_refused_on_load`、`…::test_every_event_survives_a_json_round_trip` |
+    | §4 投影 | `test_projection.py`（一轮一个 `ToolResults`、按 call 顺序、最近的快照、纯函数） |
+    | §4 `Opaque` | `test_projection.py::test_opaque_blocks_from_before_a_changed_snapshot_are_left_out`、`test_loop.py::test_a_changed_system_prompt_drops_the_earlier_thinking_from_the_request` |
+    | §4 不变量 | `test_loop.py::test_a_store_that_lost_an_event_stops_the_run_before_the_next_request` |
+    | §4 回复没写进 log | `test_loop.py::test_a_reply_the_store_cannot_take_fails_the_run_and_leaves_the_log_as_it_was` |
+    | fork 的读语义（完整验收在 S4） | `test_store.py::test_a_fork_reads_the_parents_prefix_and_then_its_own_events` |
+  - `/simplify`（四路）：采纳——store 的契约检查抽成 `check_batch()`，以后每个 store 调同一个函数；`EVENT_TYPES`
+    从 `Event` 联合里取，不再手写第二份；loop 里 tool 结果只在 `_answer()` 一处构造，`execute()` 返回是否 terminal，
+    截断分支拉平；`ToolResultEvent` 加一致性校验（`error_kind` 与 `is_error`、`terminal` 与 `executed`）；store 的
+    读写只在 `_Run.read` / `append` 两处，第一次读失败也变成 `store` 错误（原来会原样抛出，回归测试先红）；
+    `provenance_data` / `usage_data` / `ToolDef` 用 `from_attributes`；测试里自写的 model double 换成
+    lite-model 的 fake 加 usage（`Billed`）。留到以后——不变量检查只读尾部（要给 `SessionStore.read` 加参数，S4 前
+    定）；`Runner` 的输入形状（S2 加 `resume` 时一起定）；把 lite-model 与事件的转换移出 `events.py`（S3）；测试夹具
+    去重。没采纳——`turns_used()` 每轮扫 log、`Agent.tool()` 线性查找（量级很小）。
+  - Codex 只读 review：5 High、6 Medium、3 Low。修复（回归测试先红）——上一次 run 被打断后再 `run()` 会把缺少
+    tool 结果的历史发给模型：现在抛 `UnresolvedCalls`（§8，覆盖了它的前四条 High：崩溃、取消、没有
+    `run_finished` 的 run、缺结果的历史）；`load()` 接受 `v=True`；fork 的新 id 与已有 session 相同时会改掉它的
+    血缘。写明——`run_sync()` 在运行中的 event loop 里是 `RuntimeError`；`Opaque` 规则在 A→B→A 时有意保守（加了
+    测试）。否决——"usage 没有跨 run 累加"（`RunResult.usage` 按设计是本次 run 的；token / 成本预算在 S2）；
+    "`ToolResultEvent` 缺 `origin` / `timeout` 等"（S1 的词汇表有意是子集，§4 已写明）；"嵌套的 dict 可变"（只冻结
+    一层，与 lite-model 相同）；"tool 返回非 str 不该当作 tool 错误"（它是 tool 的失败，按 §5 规则 7 回给模型）；
+    "usage 合计掩盖了未知的部分"（§5 规则 6：未知不估算、不计入）；"`derive()` 应校验任意 log 的结构"（log 只由
+    loop 写，能到达的坏状态由 `UnresolvedCalls` 拦住）；非 JSON 值的往返测试（参数来自 JSON 解析，opaque 来自 SDK
+    的 `to_dict()`）。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 

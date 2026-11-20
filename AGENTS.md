@@ -25,9 +25,10 @@ If a change must contradict the design, update the design in the same change and
 
 ## Current stage
 
-**S0 done 2026-11-21: the skeleton** (uv project on lite-model v0.4.0, ruff / mypy strict / pytest, CI file,
-socket guard, packaging test, `scripts/smoke.py`). Local repository only: no GitHub remote yet (owner,
-2026-11-21), so CI has not run. P0 — `turn()` — is lite-model v0.4.0. Next: S1 (design §15).
+**S1 done 2026-11-21: events, the in-memory store, the projection, the loop and `Agent.run`** (design §3–§5;
+the rule → test table is in design §15 "阶段记录"). Public at github.com/ArthurGao/lite-agent since 2026-11-21;
+CI runs there. Next: S2 (tools with validation, budgets, gates, pause / resume,
+`fallback_role`).
 
 ## Rules
 
