@@ -1,0 +1,51 @@
+[project]
+name = "lite-agent"
+version = "0.0.1"
+description = "An agent harness library: a tool loop over lite-model roles, recorded in an append-only event log"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+# lite-model is the only sibling imported at run time (AGENTS.md rule 8): `turn()` and its types.
+# It is a direct URL in the metadata, not a [tool.uv.sources] entry: lite-model is not on PyPI, and
+# the wheel must install on its own (a sources entry does not reach the wheel's metadata; lite-cache
+# S1.5). pydantic is pinned to the version lite-model pins.
+dependencies = [
+    "lite-model @ https://github.com/ArthurGao/lite-model/releases/download/v0.4.0/lite_model-0.4.0-py3-none-any.whl",
+    "pydantic==2.14.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=1.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["uv_build>=0.10,<0.11"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "RUF"]
+
+[tool.ruff.format]
+# Code blocks in docs are hand-aligned illustrations, not code.
+exclude = ["*.md"]
+
+[tool.mypy]
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["src", "tests", "scripts"]
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# Opt-in, deselected by default: `uv run pytest -m ollama` (the real Ollama on the host).
+addopts = "-m 'not ollama'"
+markers = ["ollama: talks to the real local Ollama (opt-in: uv run pytest -m ollama)"]
