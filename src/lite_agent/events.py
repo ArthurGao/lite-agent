@@ -9,6 +9,7 @@ from typing import Annotated, Any, Literal, Self, get_args
 from lite_model import AssistantTurn, Opaque, Provenance, Text, ToolCall, Usage
 from lite_model import Block as ModelBlock
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
+from pydantic.dataclasses import dataclass as record
 
 from lite_agent.errors import EventRejected
 
@@ -22,9 +23,28 @@ StopReason = Literal[
     "budget_tokens",
     "budget_cost",
     "truncated",
+    "paused",
     "error",
 ]
-ErrorKind = Literal["invalid_args", "exception", "timeout", "truncated_turn"]
+ErrorKind = Literal[
+    "invalid_args", "denied", "exception", "timeout", "truncated_turn", "outcome_unknown"
+]
+PauseReason = Literal["approval", "tool", "reconcile"]
+# executed: this harness ran it.  external: the host ran it.  reconciled: it was interrupted and
+# the host checked what became of it.
+Origin = Literal["executed", "external", "reconciled"]
+
+
+@record(frozen=True)
+class Waiting:
+    """One call a paused run waits on: in the `paused` event and in `RunResult.pause`."""
+
+    call_id: str
+    # approval: a gate wants a person's yes or no.  tool: the host executes it and reports the
+    # result.  reconcile: it was started and its outcome is unknown (design §8).
+    reason: PauseReason
+    note: str = ""  # the gate's reason, for the person who decides
+    gate: str = ""  # the gate that asked, by name
 
 
 class _Frozen(BaseModel):
@@ -135,6 +155,7 @@ class ToolStarted(_Event):
     call_id: str
     name: str
     arguments: dict[str, Any]
+    external: bool = False  # the host executes it; its result arrives on resume
 
 
 class ToolResultEvent(_Event):
@@ -144,6 +165,7 @@ class ToolResultEvent(_Event):
     is_error: bool = False
     error_kind: ErrorKind | None = None
     executed: bool  # was the tool called at all
+    origin: Origin = "executed"
     terminal: bool = False
     original_chars: int = Field(ge=0)
 
@@ -155,6 +177,21 @@ class ToolResultEvent(_Event):
         if self.terminal and (self.is_error or not self.executed):
             raise ValueError("only a result that was executed without error can be terminal")
         return self
+
+
+class Paused(_Event):
+    """The run stops here and waits: per call, why, and the gate's note for the person."""
+
+    type: Literal["paused"] = "paused"
+    waiting: tuple[Waiting, ...]
+
+
+class Resumed(_Event):
+    """What `resume()` was given: decisions per call id, and the ids results were brought for."""
+
+    type: Literal["resumed"] = "resumed"
+    approve: dict[str, bool] = Field(default_factory=dict)
+    results: tuple[str, ...] = ()
 
 
 class ModelErrorEvent(_Event):
@@ -178,6 +215,8 @@ Event = Annotated[
     | ModelTurn
     | ToolStarted
     | ToolResultEvent
+    | Paused
+    | Resumed
     | ModelErrorEvent
     | RunFinished,
     Field(discriminator="type"),

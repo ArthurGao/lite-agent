@@ -37,7 +37,19 @@ from lite_agent.events import (
     blocks_of,
     provenance_data,
 )
-from tests.helpers import T0, THINKING, WHO, Billed, Recording, agent, call, events_of, kinds, say
+from tests.helpers import (
+    T0,
+    THINKING,
+    WHO,
+    Billed,
+    FailingOnce,
+    Recording,
+    agent,
+    call,
+    events_of,
+    kinds,
+    say,
+)
 
 ENV: dict[str, Any] = {"session_id": "id1", "time": T0, "run_id": "id2"}
 CLOCK_DEF = ToolDef(
@@ -378,6 +390,22 @@ async def test_a_failed_call_that_was_billed_counts_and_one_that_never_answered_
     assert isinstance(recorded, ModelErrorEvent) and recorded.usage is None
 
 
+async def test_a_turn_that_repeats_a_call_id_is_a_model_failure_and_nothing_runs() -> None:
+    # Codex review 2026-11-21: results are matched to calls by id, so two calls with one id
+    # could not both be answered.
+    tools = Recording()
+    twice = call(("c1", "get_time", {}), ("c1", "get_time", {"tz": "UTC"}))
+    model = AsyncFakeModel(agent=[twice, say("never asked")])
+    a = agent(model, tools.tool("get_time", "12:00"))
+
+    result = await a.run("Time?")
+
+    assert (result.outcome, result.stop) == ("failed", "error")
+    assert result.error == RunError("model", "DuplicateCallIds")
+    assert kinds(await events_of(a, "id1"))[3:] == ["model_error", "run_finished"]
+    assert tools.ran == [] and len(model.turn_calls) == 1
+
+
 # --- §5 rule 9: a model failure ---
 
 
@@ -476,20 +504,6 @@ async def test_a_store_that_cannot_be_read_fails_the_run_at_any_point() -> None:
         assert (result.outcome, result.stop) == ("failed", "error")
         assert result.error == RunError("store", "ConnectionError")
     assert model.turn_calls == []
-
-
-class FailingOnce(InMemorySessionStore):
-    """Refuses, one time, the append that would write the given seq."""
-
-    def __init__(self, seq: int) -> None:
-        super().__init__()
-        self.fail_at: int | None = seq
-
-    async def append(self, session_id: str, events: Sequence[Event], *, expected_seq: int) -> None:
-        if self.fail_at is not None and any(e.seq == self.fail_at for e in events):
-            self.fail_at = None
-            raise OSError("disk full")
-        await super().append(session_id, events, expected_seq=expected_seq)
 
 
 @pytest.mark.parametrize(

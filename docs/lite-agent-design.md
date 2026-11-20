@@ -97,11 +97,12 @@ class Agent:
     runner: Runner = InProcessRunner()
     clock: Callable[[], datetime] = ...         # event times
     ids: Callable[[], str] = ...                # session and run ids
-    # S2: fallback_role, gates     S3: skills, memory, compaction
+    gates: Sequence[Gate] = ()                  # S2b: asked in order before a tool runs (§8)
+    # S2c: done, fallback_role     S3: skills, memory, compaction
 
     async def run(self, task: str, *, session_id: str | None = None) -> RunResult: ...
+    async def resume(self, session_id: str, input: Resume | None = None) -> RunResult: ...   # S2b
     def run_sync(self, task: str, *, session_id: str | None = None) -> RunResult: ...
-    # S2: async def resume(self, session_id: str, input: ResumeInput | None = None) -> RunResult
 
 @dataclass(frozen=True)
 class RunResult:
@@ -112,7 +113,29 @@ class RunResult:
     text: str | None            # the last assistant text, when there is one
     error: RunError | None      # kind: model | store | harness; the exception's type name, never upstream text
     usage: Usage                # this run's model calls, summed; an unknown part stays None
-    # S2: pause: Pause | None, switched: bool
+    pause: Pause | None = None  # S2b: set exactly when outcome is "paused"
+    # S2c: switched: bool
+
+@dataclass(frozen=True)
+class Waiting:                  # S2b: one call a paused run waits on
+    call_id: str
+    reason: Literal["approval", "tool", "reconcile"]
+    note: str = ""              # the gate's reason, for the person who decides
+
+@dataclass(frozen=True)
+class Pause:                    # S2b
+    waiting: tuple[Waiting, ...]          # .call_ids
+
+@dataclass(frozen=True)
+class ToolOutcome:              # S2b: what the host reports for a call it executed or checked
+    content: str
+    is_error: bool = False
+    unknown: bool = False       # nobody can tell whether it took effect
+
+@dataclass(frozen=True)
+class Resume:                   # S2b: what the host brings back
+    approve: Mapping[str, bool] = {}          # call id -> go ahead?   (calls not started yet)
+    results: Mapping[str, ToolOutcome] = {}   # call id -> result      (calls already started)
 
 class SessionStore(Protocol):
     async def append(self, session_id: str, events: Sequence[Event], *, expected_seq: int) -> None: ...
@@ -142,16 +165,21 @@ class Budget:                                   # S2a; turns / tokens / cost_usd
     tool_timeout_s: float = 60.0
     auto_continues: int = 2                     # per run (S2c)
 
-class Gate(Protocol):                           # S2: runs before a tool call executes
+class Gate(Protocol):                           # S2b: asked before a tool call executes
     name: str
     async def check(self, call: ToolCall, ctx: RunContext) -> Allow | Deny | PauseFor: ...
+    # Deny(reason): the reason goes back to the model.  PauseFor(reason): for the person.
+    # RunContext: session_id, run_id, events (the log so far)
 
 class Runner(Protocol):                         # where the loop's steps execute
-    async def run(self, agent: Agent, session_id: str | None, task: str) -> RunResult: ...
+    async def run(self, agent: Agent, session_id: str | None, input: str | Resume) -> RunResult: ...
 ```
 
 - `run(task)` 开一个新 session；`run(task, session_id=…)` 是那个 session 的下一次 run（多轮对话），不存在的
-  session 抛 `UnknownSession`。`Runner.run` 的 `session_id=None` 表示新 session。
+  session 抛 `UnknownSession`。`Runner.run` 的输入是任务（`str`；`session_id=None` 表示新 session）或 `Resume`。
+- `resume(session_id, input)`（S2b）接着一个暂停、失败或被打断的 session 往下走（§8）。不带输入也可以调用：重试
+  失败的那一轮，或恢复可以安全重跑的 call。输入对不上（不存在的 call id、给已开始的 call 批准、给没开始的 call
+  结果、session 已经完整结束）抛 `ValueError`，不写任何事件。
 - `Tool` 用 JSON Schema 字典而不是 Pydantic 模型：loop 只需要把定义交给模型、把参数交给函数。两个实现：
   `@tool`（S2a）做出 `ModelTool`——schema 是模型的 `model_json_schema()`，`validate()` 用 Pydantic 校验，函数拿到的
   是模型实例；`FunctionTool` 包一个拿原始参数的 async 函数，不校验。
@@ -172,7 +200,9 @@ class Runner(Protocol):                         # where the loop's steps execute
 信封：`session_id`、`seq`（单调，从 1 起）、`time`、`run_id`、`type`、`v`（事件词汇表版本，现在是 1）；各类型自己的
 字段平铺在事件上。事件是 frozen 的 Pydantic 模型，`dump()` / `load()` 做 JSON 往返；`load()` 拒绝未知的 `type`、
 多余的字段和更新的 `v`。S1 实现了下表里的 8 种：`session_started`、`run_started`、`user_message`、`model_turn`、
-`tool_started`、`tool_result`、`model_error`、`run_finished`；其余在用到它的阶段加。
+`tool_started`、`tool_result`、`model_error`、`run_finished`；S2b 加了 `paused`、`resumed`；其余在用到它的阶段加。
+**`V` 在 v0.1.0 发版之前保持 1**：还没有发过版，也没有持久化的 store，不存在旧 log；从 v0.1.0 起词汇表才算冻结，
+之后的变化才升版本。
 
 | type | data | 模型可见 |
 | --- | --- | --- |
@@ -184,7 +214,7 @@ class Runner(Protocol):                         # where the loop's steps execute
 | `tool_result` | `call_id`、内容（已截断）、`is_error`、`error_kind`（`invalid_args` / `denied` / `exception` / `timeout` / `truncated_turn` / `outcome_unknown`）、`executed`（tool 是否被调用过）、`origin`（`executed` / `external` / `reconciled`）、`terminal`、原始长度 | 是 |
 | `context_added` | skill / memory 注入的文本（写入时已包好外层标签） | 是 |
 | `compaction` | 摘要、覆盖的 seq 区间、做摘要的 role、provenance、usage | 是（替代被覆盖的区间） |
-| `paused` / `resumed` | 原因（`approval` / `tool` / `reconcile`）和等待的 `call_id` 列表 / 恢复时的输入 | 否 |
+| `paused` / `resumed` | `paused.waiting`：每个等待的 call 一项（`call_id`、原因 `approval` / `tool` / `reconcile`、gate 给人看的说明）；`resumed`：`approve`（call id → 是否批准）和带了结果的 call id 列表（结果本身在 `tool_result` 里） | 否 |
 | `model_error` | 失败调用的错误类型、role、`purpose`（`turn` / `compact`）、usage（拿不到时为 `None`） | 否 |
 | `model_switched` | from / to role、原因（§5 规则 11） | 否 |
 | `run_finished` | outcome、stop、usage 合计 | 否 |
@@ -247,7 +277,8 @@ class Runner(Protocol):                         # where the loop's steps execute
    turn 预算照算。压缩调用计入 token 和成本，不计入 turn。检查的是"已经用掉的是否达到预算"：token 是每次
    调用的 input + output 之和，下一次调用会用多少事先不知道，所以最后一次调用可以超出一点，之后不再调用。
 7. tool 抛的异常变成 `is_error` 的 `tool_result` 送回模型；`Gate` 的 `Deny` 同样。只有 harness 自己的错误
-   （store 写失败、投影不变量不成立）才让 run 失败。
+   （store 写失败、投影不变量不成立）才让 run 失败。同一轮里有两个 call 用了同一个 id 时，结果没法和 call
+   对上：这一轮不记成 `model_turn`，写 `model_error`（`DuplicateCallIds`，带这次调用的 usage），run 失败。
 8. 同一轮里的多个 tool call 默认顺序执行；并行执行见 §16。
 9. **模型调用失败（超时、连接错误、5xx、429）**：重试只在 lite-model 里做（同一个 target，`max_retries`，
    它的设计 §8），loop 不再叠一层重试。重试用尽后 lite-model 抛 `CallFailed`：写 `model_error` 事件，run 以
@@ -315,8 +346,10 @@ class Runner(Protocol):                         # where the loop's steps execute
 - **外部执行的 tool**（`external=True`；HTTP 壳的"客户端执行 tool"用它，§10）。事件顺序：校验 → gate →
   `tool_started`（`external=True`）→ `paused`（`reason=tool`，带 `call_id`）→ run 以 `paused` 结束 → 宿主
   执行 → `resume(session_id, ToolResults({call_id: ...}))` → `resumed` → `tool_result`（`origin=external`）。
-  同一轮里有多个外部 call 时一起暂停，结果要一次交齐。已有结果的 `call_id` 再交一次会被拒绝。宿主执行了
-  但提交丢了：这个 call 仍是"已开始、没有结果"，宿主重新提交即可；宿主那边的副作用用 `call_id` 去重。
+  同一轮里有多个外部 call 时一起暂停。结果可以分几次交：没交的那些让 run 再次暂停（实现比"必须一次交齐"简单，
+  对宿主也更宽容）。已有结果的 `call_id` 再交一次抛 `ValueError`，不写事件。宿主执行了但提交丢了：这个 call
+  仍是"已开始、没有结果"，宿主重新提交即可；宿主那边的副作用用 `call_id` 去重。宿主报告的结果 `origin=external`，
+  报错时 `error_kind=exception`；`terminal` 的外部 tool 成功时照样可以结束 run。
 
 ## 8. 预算、闸门、暂停
 
@@ -340,10 +373,26 @@ class Runner(Protocol):                         # where the loop's steps execute
       `tool_result`（`origin=reconciled`）写入；核实不了就提交一个 `error_kind=outcome_unknown` 的错误
       结果，让模型知道这一步状态不明。
   - harness 不替宿主保证恰好一次。
-- **S1 的行为**（`resume()` 在 S2）：对一个 session 再 `run()` 时，如果最后一轮有 call 没有结果（上一次 run 在
-  call 和结果之间被打断：崩溃、取消、store 写失败），`run()` 抛 `UnresolvedCalls`（带 call id），不写任何事件、
-  不发请求、不重跑 tool。原因：这样的历史 API 会拒绝，而且可能已经执行过的 tool 不能盲目重跑。S2 用上面的
-  规则逐个处理这些 call，取代这个拒绝。
+- **一个机制**（S2b，`loop._Run.settle` / `settle_turn`）：新的一轮和恢复走同一段代码——把最后一轮里还没有结果的
+  call 按顺序逐个处理。需要等待的 call 不挡住同一轮里其它的 call（它们是模型并行发出的，互不依赖）；只要有一个
+  在等，run 就写 `paused`、以 `outcome=paused` 结束，`RunResult.pause` 列出每个等待的 call 和原因。
+  - 批准（`approve=True`）之后不再问 gate：人的决定代替 gate。`approve=False` → `error_kind=denied`。
+  - **等审批是写在 log 里的**（`paused` 事件）：没有拿到决定的 call 一直等下去，恢复时不再问 gate，也不管恢复
+    它的那个 `Agent` 现在配了哪些 gate。给一个 call 的决定不会连带放行同一轮里另一个在等的 call。
+  - `Resume` 带来的决定和结果只作用于它要处理的那一轮：之后的轮次即使复用了同一个 call id（模型常这样做），
+    也要重新过 gate。
+  - **gate 出错按拒绝处理**：gate 抛异常，或者返回的不是 `Allow` / `Deny` / `PauseFor`，这个 call 以
+    `error_kind=denied` 回给模型（内容写明是哪个 gate、什么类型的错，不带异常的文字），run 继续。没有得到许可
+    就不执行。
+  - 被打断的幂等 tool 重跑之前，先用现在的 `validate()` 检查当时存下的参数；不再合法就不重跑，转成
+    `reconcile` 等人核对。
+  - 校验先于 gate：参数不合法的 call 不会拿去问人。
+  - 没有未完成的 call 时 `resume()` 只是重发上一轮（上一次模型调用失败了，§5 规则 9）。已经 `completed` 的 run
+    （包括以 terminal tool 结束、历史停在 tool 结果上的）和历史以 assistant 的完整回复结尾的 session 没有东西可
+    恢复，抛 `ValueError`。
+  - 每次 `resume()` 是一次新的 run（新的 `run_started` 和快照，然后 `resumed`）；预算从 log 合计，不会重置。
+- 对有未完成 call 的 session 调 `run(task)` 仍然抛 `UnresolvedCalls`（提示用 `resume()`）：在缺结果的历史上再加一条
+  任务，API 会拒绝，而且可能已经执行过的 tool 不能盲目重跑。
 
 ## 9. Runner 与 Temporal（S7，可选）
 
@@ -558,6 +607,43 @@ docs/lite-agent-design.md
     写的消息原样返回。否决——"校验两次可能有副作用"（validator 有副作用是宿主的问题，见上）；"布尔值能通过整数
     预算的检查"（Python 里 `True` 就是 1，不值得单独拦）。README 的例子原样在本机 Ollama 的 qwen3:8b 上跑通（2026-11-21）：模型调了 tool，再用结果回答，
     log 是 `session_started` 到 `run_finished` 的 8 条事件。这是 lite-agent 第一次对着真实模型跑完整个 loop。
+- **S2b（2026-11-21）**：`gates.py`（`Gate`、`Allow` / `Deny` / `PauseFor`、`RunContext`）、`Agent.gates` /
+  `resume()`、`Resume` / `ToolOutcome` / `Pause` / `Waiting`、事件 `paused` / `resumed`、`tool_started.external`、
+  `tool_result.origin`；`loop` 里 `execute()` 拆成 `settle()`（检查、gate、开始）和 `run_tool()`（执行并回答），
+  `settle_turn()` 给新的一轮和恢复共用。测试先写（`tests/unit/test_pause_resume.py`）；实现是一次写完的，所以另用
+  逐行破坏确认：24 处里 22 处变红，剩下 2 处（恢复时外部 call 的等待原因、宿主报告的 terminal 结果）补了测试后变红。
+  - 与 plan 的出入：`Pause` 是 `waiting: tuple[Waiting, ...]` 而不是 `(reason, call_ids)`——同一轮里可以同时有等
+    审批的和等宿主执行的，一个原因装不下，而且审批的人需要看到 gate 给的说明；暂停的 `stop` 叫 `paused` 不叫
+    `gate`；外部 tool 的结果可以分几次交（§7）；S2a 的"拒绝 external tool"和它的测试按计划去掉了。
+  - 规则 → 测试：gate（§8）`test_a_denied_call_is_answered_without_running_and_the_run_goes_on`、
+    `test_gates_are_asked_in_order_and_the_first_refusal_wins`、`test_invalid_arguments_are_refused_before_any_gate_is_asked`；
+    审批 `test_a_gate_that_wants_a_person_ends_the_run_as_paused`、`test_an_approved_call_runs_once_and_the_run_completes`、
+    `test_a_rejected_call_is_answered_as_denied_and_never_runs`、`test_the_rest_of_a_batch_runs_while_one_call_waits`；
+    外部 tool（§7）`test_an_external_tool_pauses_the_run_and_its_result_comes_back_on_resume`、
+    `test_external_calls_of_one_turn_pause_together_and_may_come_back_in_parts`、
+    `test_a_result_submitted_twice_is_refused_and_nothing_is_written`；被打断的 call（§8）
+    `test_an_idempotent_tool_is_run_again_with_the_same_call_id`、
+    `test_a_tool_that_may_have_run_is_not_repeated_and_the_run_waits_to_be_reconciled`、
+    `test_an_outcome_nobody_can_verify_is_told_to_the_model_as_unknown`、
+    `test_a_call_that_was_never_started_simply_runs_on_resume`；`resume()` 的边界
+    `test_resume_after_a_failed_model_call_sends_the_turn_again`、
+    `test_resume_refuses_what_it_cannot_apply_and_writes_nothing`、
+    `test_pausing_and_resuming_does_not_grant_a_fresh_turn_budget`、
+    `test_resuming_under_changed_tools_records_them_and_drops_earlier_thinking`。
+  - `/simplify`（两路）：采纳——"最后一轮和它之后的事件"抽成 `projection.last_turn()`（原来写了三遍）；`settle()`
+    拆成 `recover()`（已开始的 call）和 `admit()`（还没动的 call）；`Resume` 输入改成 `settle_turn()` 的参数，只作用
+    于它要处理的那一轮——**这是个真问题**：原来存在 run 上，后面轮次复用同一个 call id 时旧的批准会让它跳过 gate
+    （回归测试先红）；`Waiting` 只定义一次，`paused` 事件里存带字段名的记录（原来是无名数组），并记下是哪个 gate；
+    `Origin` 起别名；`FailingOnce` 挪进 `tests/helpers.py`；`run_loop()` 里的类型判断收成一次。留着——
+    `ToolOutcome` 用两个布尔表示三种状态（接口已批准，文档里写明 `unknown` 优先）；每个 call 建一次
+    `RunContext`（后一个 call 的 gate 要看到前一个 call 的结果）。备忘——S7 的 Temporal runner：暂停即 workflow
+    结束、resume 起新的 workflow，与现在"每次 resume 是一次新 run"一致。
+  - Codex 只读 review：3 High、5 Medium、1 Low。修复（回归测试先红）——以 terminal tool 结束的 session 还能
+    `resume()` 并再调一次模型；幂等 tool 重跑时不校验存下的参数；同一轮里重复的 call id 会让结果张冠李戴；gate
+    返回的不是决定时被当成放行；gate 抛异常会让 run 停在没有 `run_finished` 的状态；只批准一个 call 时，另一个在
+    等审批的 call 可能因为 gate 换了而被执行（现在等待状态取自 log）。否决——"store 提交了但调用方看到失败时
+    重交结果会被拒"（这是 store 的原子性契约，`check_batch` 之外不在 loop 里兜底）。不改——宿主交回的结果同样按
+    预算截断（log 里存的就是模型看到的，§4）。没有跑第二轮 Codex。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 

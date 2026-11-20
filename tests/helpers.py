@@ -67,6 +67,7 @@ class Recording:
         terminal: bool = False,
         delay: float = 0,
         timeout_s: float | None = None,
+        idempotent: bool = False,
     ) -> FunctionTool:
         """`delay`: seconds the tool sleeps after noting the call (for timeout tests)."""
 
@@ -85,6 +86,7 @@ class Recording:
             fn,
             terminal=terminal,
             timeout_s=timeout_s,
+            idempotent=idempotent,
         )
 
 
@@ -126,3 +128,17 @@ def kinds(events: Sequence[Event]) -> list[str]:
 
 def results_of(events: Sequence[Event]) -> list[ToolResultEvent]:
     return [e for e in events if isinstance(e, ToolResultEvent)]
+
+
+class FailingOnce(InMemorySessionStore):
+    """Refuses, one time, the append that would write the given seq: a crash at that point."""
+
+    def __init__(self, seq: int) -> None:
+        super().__init__()
+        self.fail_at: int | None = seq
+
+    async def append(self, session_id: str, events: Sequence[Event], *, expected_seq: int) -> None:
+        if self.fail_at is not None and any(e.seq == self.fail_at for e in events):
+            self.fail_at = None
+            raise OSError("disk full")
+        await super().append(session_id, events, expected_seq=expected_seq)

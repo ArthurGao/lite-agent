@@ -14,7 +14,9 @@ from lite_agent.events import (
     Event,
     ModelErrorEvent,
     ModelTurn,
+    Paused,
     ProvenanceData,
+    Resumed,
     RunFinished,
     RunStarted,
     SessionStarted,
@@ -24,6 +26,7 @@ from lite_agent.events import (
     UsageData,
     UserMessage,
     V,
+    Waiting,
     blocks_of,
     dump,
     load,
@@ -81,6 +84,12 @@ ONE_OF_EACH: list[Event] = [
     ),
     ModelErrorEvent(seq=7, error="CallFailed", role="agent", usage=None, **ENVELOPE),
     RunFinished(seq=8, outcome="failed", stop="error", usage=UsageData(), **ENVELOPE),
+    Paused(
+        seq=9,
+        waiting=(Waiting("c1", "approval", "ask a person", "money-gate"), Waiting("c2", "tool")),
+        **ENVELOPE,
+    ),
+    Resumed(seq=10, approve={"c1": True}, results=("c2",), **ENVELOPE),
 ]
 
 
