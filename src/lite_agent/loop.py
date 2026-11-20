@@ -6,7 +6,7 @@ from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING
 
-from lite_model import AssistantTurn, ModelError, ToolCall, Usage
+from lite_model import AssistantTurn, CallFailed, ModelError, ToolCall, Usage
 
 from lite_agent.budget import add_usage, spent
 from lite_agent.errors import HarnessError, StoreError, UnknownSession, UnresolvedCalls
@@ -14,6 +14,7 @@ from lite_agent.events import (
     ErrorKind,
     Event,
     ModelErrorEvent,
+    ModelSwitched,
     ModelTurn,
     Origin,
     Outcome,
@@ -54,6 +55,7 @@ TIMED_OUT = (
 CUT = "\n[truncated: the first {kept} of {total} characters]"
 NOT_APPROVED = "The call was not approved. Nothing was executed."
 DENIED = "The call was refused: {reason} Nothing was executed."
+GO_ON = "Your reply was cut off at the output limit. Continue exactly where it stopped."
 GATE_FAILED = "The gate {gate!r} could not decide ({error}). Nothing was executed."
 
 # An event still missing its envelope: `partial(RunFinished, outcome=..., ...)`. `_Run.append`
@@ -67,6 +69,7 @@ class _Run:
         self.session_id = session_id
         self.run_id = run_id
         self.log: list[Event] = []  # what this run believes the session holds
+        self.opened = 0  # the seq of this run's run_started: what follows it is this run's
         self.usage = Usage()
 
     # --- the store: the only two places it is touched ---
@@ -80,19 +83,27 @@ class _Run:
         except Exception as exc:
             raise StoreError(f"read failed: {type(exc).__name__}") from exc
 
-    async def append(self, *pending: Pending) -> None:
-        """Append one batch, all or nothing. A store that fails ends the run (§4)."""
-        tail = self.log[-1].seq if self.log else 0
+    def stamp(self, *pending: Pending, after: int | None = None) -> list[Event]:
+        """Give pending events their envelope: this session and run, now, and the seqs that
+        follow `after` (default: the log's tail)."""
+        tail = after if after is not None else (self.log[-1].seq if self.log else 0)
         time = self.agent.clock()
-        batch = [
+        return [
             make(session_id=self.session_id, seq=tail + offset, time=time, run_id=self.run_id)
             for offset, make in enumerate(pending, start=1)
         ]
+
+    async def write(self, batch: list[Event]) -> None:
+        """Append one batch, all or nothing. A store that fails ends the run (§4)."""
+        tail = self.log[-1].seq if self.log else 0
         try:
             await self.agent.sessions.append(self.session_id, batch, expected_seq=tail)
         except Exception as exc:
             raise StoreError(f"append failed: {type(exc).__name__}") from exc
         self.log += batch
+
+    async def append(self, *pending: Pending) -> None:
+        await self.write(self.stamp(*pending))
 
     # --- what is derived from the log ---
 
@@ -103,6 +114,38 @@ class _Run:
         if derive(await self.read()) != built:
             raise HarnessError("the stored log does not project to the request this run built")
         return built
+
+    # What a run has done is read from the log: the events after its own `run_started`. A run
+    # resumed elsewhere therefore starts clean, on the primary role and with its own
+    # continuations (§5 rules 3 and 11); run ids play no part, so a host may reuse them.
+
+    def switched(self) -> bool:
+        return any(isinstance(e, ModelSwitched) and e.seq > self.opened for e in self.log)
+
+    def role(self) -> str:
+        """The role the next call goes to: the fallback once this run has switched."""
+        fallback = self.agent.fallback_role
+        return fallback if fallback is not None and self.switched() else self.agent.role
+
+    def may_continue(self) -> bool:
+        """Whether this run may still send the model on by itself (§5 rule 3)."""
+        sent = sum(
+            isinstance(e, UserMessage) and e.seq > self.opened and e.origin == "auto_continue"
+            for e in self.log
+        )
+        return sent < self.agent.budget.auto_continues
+
+    def still_open(self, log: tuple[Event, ...]) -> str | None:
+        """What the host's completion condition says is left to do; None when the task is done
+        or there is no condition. A wrong kind of answer is the host's error and raises."""
+        if self.agent.done is None:
+            return None
+        answer = self.agent.done(log)
+        if answer is None:
+            return None
+        if not isinstance(answer, str):
+            raise TypeError(f"Agent.done must return text or None, not {type(answer).__name__}")
+        return answer if answer.strip() else None
 
     def over_budget(self) -> StopReason | None:
         """The budget the session has used up, if any: checked before a model call, so the call
@@ -156,7 +199,15 @@ class _Run:
         pause: Pause | None = None,
     ) -> RunResult:
         return RunResult(
-            self.session_id, self.run_id, outcome, stop, text, error, self.usage, pause
+            self.session_id,
+            self.run_id,
+            outcome,
+            stop,
+            text,
+            error,
+            self.usage,
+            pause=pause,
+            switched=self.switched(),
         )
 
     async def finish(
@@ -167,10 +218,15 @@ class _Run:
         text: str | None = None,
         error: RunError | None = None,
         pause: Pause | None = None,
+        after: Event | None = None,
     ) -> RunResult:
-        await self.append(
-            partial(RunFinished, outcome=outcome, stop=stop, usage=usage_data(self.usage))
-        )
+        """Close the run. `after` is a stamped event that has not been written yet: it goes in
+        the same batch, so the log never holds it without the run's end."""
+        closing = partial(RunFinished, outcome=outcome, stop=stop, usage=usage_data(self.usage))
+        if after is None:
+            await self.append(closing)
+        else:
+            await self.write([after, *self.stamp(closing, after=after.seq)])
         return self.result(outcome, stop, text=text, error=error, pause=pause)
 
     # --- one tool call (§8) ---
@@ -314,23 +370,30 @@ class _Run:
             if (used_up := self.over_budget()) is not None:
                 return await self.finish("failed", used_up)
             request = await self.projection()
+            role = self.role()
             try:
-                reply = await agent.model.turn(agent.role, request.messages, request.tools)
+                reply = await agent.model.turn(role, request.messages, request.tools)
             except ModelError as exc:
-                # after lite-model's own retries on the same model; no fallback here (§5 rule 9)
+                # after lite-model's own retries on the same model (§5 rule 9)
                 self.usage = add_usage(self.usage, exc.usage)
                 name = type(exc).__name__
                 usage = usage_data(exc.usage) if exc.usage is not None else None
-                await self.append(
-                    partial(ModelErrorEvent, error=name, role=agent.role, usage=usage)
-                )
+                failed = partial(ModelErrorEvent, error=name, role=role, usage=usage)
+                fallback = agent.fallback_role
+                if isinstance(exc, CallFailed) and fallback is not None and not self.switched():
+                    # §5 rule 11: only a model that could not be reached, and once per run. The
+                    # failure and the switch are written together; the turn is sent again.
+                    switch = partial(ModelSwitched, from_role=role, to_role=fallback, reason=name)
+                    await self.append(failed, switch)
+                    continue
+                await self.append(failed)
                 return await self.finish("failed", "error", error=RunError("model", name))
             self.usage = add_usage(self.usage, reply.usage)
             turn = partial(
                 ModelTurn,
                 blocks=blocks_of(reply.turn),
                 stop=reply.stop,
-                role=agent.role,
+                role=role,
                 provenance=provenance_data(reply.provenance),
                 usage=usage_data(reply.usage),
             )
@@ -341,9 +404,7 @@ class _Run:
                 # answered, so the turn is unusable and nothing of it is recorded as a turn
                 usage = usage_data(reply.usage)
                 name = "DuplicateCallIds"
-                await self.append(
-                    partial(ModelErrorEvent, error=name, role=agent.role, usage=usage)
-                )
+                await self.append(partial(ModelErrorEvent, error=name, role=role, usage=usage))
                 return await self.finish("failed", "error", error=RunError("model", name))
             if reply.stop == "length" and calls:
                 # §5 rule 1: none of a cut-off turn's calls runs, and each still gets its result
@@ -352,13 +413,28 @@ class _Run:
                 )
                 await self.append(turn, *refusals)
                 continue
-            await self.append(turn)
-            if reply.stop == "length":  # cut-off text: nothing to answer, no way to go on yet (S2c)
-                return await self.finish("failed", "truncated", text=text)
-            if not calls:
-                return await self.finish("completed", "end_turn", text=text)
-            if (ended := await self.settle_turn()) is not None:
-                return ended
+            if calls:
+                await self.append(turn)
+                if (ended := await self.settle_turn()) is not None:
+                    return ended
+                continue
+            # A text-only turn. Cut off: ask it to go on. Otherwise it is a report, and the
+            # host's completion condition, shown the log with this turn in it, says whether the
+            # task is done (§5 rule 3). The turn is written together with what follows it (the
+            # message that sends it back, or the run's end): a crash in between would leave a
+            # session that looks finished and is not.
+            cut = reply.stop == "length"
+            (said,) = self.stamp(turn)
+            still_open = GO_ON if cut else self.still_open((*self.log, said))
+            if still_open is None:
+                return await self.finish("completed", "end_turn", text=text, after=said)
+            if self.may_continue():
+                again = partial(UserMessage, text=still_open, origin="auto_continue")
+                await self.write([said, *self.stamp(again, after=said.seq)])
+                continue
+            # still open, and the run has used its continuations: a person looks at it
+            stop: StopReason = "truncated" if cut else "incomplete"
+            return await self.finish("failed", stop, text=text, after=said)
 
 
 def _check_resume(log: list[Event], given: Resume) -> None:
@@ -367,8 +443,11 @@ def _check_resume(log: list[Event], given: Resume) -> None:
     turn = last_turn(log)
     waiting = turn.unanswered if turn is not None else ()
     started = turn.started if turn is not None else {}
+    awaiting = turn.awaiting if turn is not None else {}
     for call_id in given.approve:
-        if call_id not in waiting or call_id in started:
+        # An approval stands in for the gates, so it may only answer a question a gate asked:
+        # the call must be one the log records as waiting for a person.
+        if call_id not in waiting or call_id in started or call_id not in awaiting:
             raise ValueError(f"call {call_id} is not waiting for approval")
     for call_id in given.results:
         if call_id not in waiting or call_id not in started:
@@ -395,7 +474,13 @@ async def run_loop(agent: "Agent", session_id: str | None, input: str | Resume) 
     run = _Run(agent, session_id or agent.ids(), agent.ids())
     tools = tuple(ToolDef.model_validate(t, from_attributes=True) for t in agent.tools)
     opening: list[Pending] = [
-        partial(RunStarted, role=agent.role, system=agent.system, tools=tools)
+        partial(
+            RunStarted,
+            role=agent.role,
+            fallback_role=agent.fallback_role,
+            system=agent.system,
+            tools=tools,
+        )
     ]
     try:
         if session_id is None:
@@ -414,6 +499,7 @@ async def run_loop(agent: "Agent", session_id: str | None, input: str | Resume) 
             assert isinstance(input, str)
             opening.append(partial(UserMessage, text=input))
         await run.append(*opening)
+        run.opened = next(e.seq for e in reversed(run.log) if isinstance(e, RunStarted))
         if open_calls and (ended := await run.settle_turn(given)) is not None:
             return ended
         return await run.loop()

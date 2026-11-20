@@ -13,6 +13,7 @@ from lite_agent.events import (
     EVENT_TYPES,
     Event,
     ModelErrorEvent,
+    ModelSwitched,
     ModelTurn,
     Paused,
     ProvenanceData,
@@ -90,6 +91,7 @@ ONE_OF_EACH: list[Event] = [
         **ENVELOPE,
     ),
     Resumed(seq=10, approve={"c1": True}, results=("c2",), **ENVELOPE),
+    ModelSwitched(seq=11, from_role="agent", to_role="backup", reason="CallFailed", **ENVELOPE),
 ]
 
 

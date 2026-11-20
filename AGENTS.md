@@ -29,8 +29,9 @@ If a change must contradict the design, update the design in the same change and
 the rule → test table is in design §15 "阶段记录"). Public at github.com/ArthurGao/lite-agent since 2026-11-21;
 CI runs there. S2 is done in three parts (design §15): **S2a done 2026-11-21** — `@tool` with
 Pydantic validation, result truncation, tool timeouts, token and cost budgets. **S2b done 2026-11-21** — gates, `paused` runs,
-`resume()` (approval, tools the host executes, calls an interrupted run left open). Next: S2c
-(auto-continue, `fallback_role`).
+`resume()` (approval, tools the host executes, calls an interrupted run left open). **S2c done 2026-11-21** —
+a completion condition with automatic continuation, cut-off text asked to go on, `fallback_role`. S2 is
+complete. Next: S3 (skills, compaction, the `Memory` protocol).
 
 ## Rules
 

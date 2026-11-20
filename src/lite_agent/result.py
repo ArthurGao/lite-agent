@@ -57,3 +57,4 @@ class RunResult:
     error: RunError | None
     usage: Usage  # this run's model calls, summed; an unknown part stays None
     pause: Pause | None = None  # set exactly when outcome is "paused"
+    switched: bool = False  # this run moved to the agent's fallback role (design §5 rule 11)

@@ -550,6 +550,27 @@ async def test_resume_refuses_what_it_cannot_apply_and_writes_nothing() -> None:
         await ext.resume(waiting.session_id, Resume(approve={"c1": True}))
 
 
+async def test_an_approval_is_only_taken_for_a_call_a_gate_left_waiting() -> None:
+    # Security review 2026-11-21: an approval stands in for the gates, so it may only answer a
+    # question a gate actually asked. Here no gate ever paused c1 (the run broke before the call
+    # started), and the gate would refuse it.
+    tools = Recording()
+    model = AsyncFakeModel(agent=[call(("c1", "pay", {"amount": 5})), say("Refused.")])
+    store = FailingOnce(5)
+    broken = await agent(model, tools.tool("pay"), sessions=store).run("Pay.")
+    before = list(await store.read("id1"))
+
+    gated = agent(
+        model, tools.tool("pay"), gates=[Gate(pay=Deny("no"))], sessions=store, ids=lambda: "r9"
+    )
+    with pytest.raises(ValueError, match="not waiting for approval"):
+        await gated.resume(broken.session_id, Resume(approve={"c1": True}))
+
+    assert list(await store.read("id1")) == before and tools.ran == []
+    result = await gated.resume(broken.session_id)  # without the approval, the gate decides
+    assert result.text == "Refused." and tools.ran == []
+
+
 async def test_resume_refuses_a_session_that_completed_on_a_terminal_tool() -> None:
     # Codex review 2026-11-21: its history ends on tool results, but the run is over.
     model = AsyncFakeModel(agent=[call(("c1", "submit", {})), say("never asked")])
