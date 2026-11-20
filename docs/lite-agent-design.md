@@ -1,6 +1,6 @@
 # lite-agent 设计文档
 
-**状态：设计草稿（2026-11-20），未开始实现。S1 完成（2026-11-21）：事件、内存 store、投影、loop、`Agent.run`。只在本地，尚无远端仓库。下一步 S2。**
+**状态：S1 完成（2026-11-21）：事件、内存 store、投影、loop、`Agent.run`。P0 是 lite-model v0.4.0 的 `turn()`。仓库 2026-11-21 起公开在 github.com/ArthurGao/lite-agent。下一步 S2。**
 与代码冲突时，在同一次改动里更新本文，并在 commit 里说明原因。
 
 ## 0. 决策记录
@@ -464,9 +464,9 @@ docs/lite-agent-design.md
   - 压缩：不给就不压缩；`SummaryCompactor` 的阈值配置和缺失时的报错；成功 / 失败的事件、怎么计预算（§6）。
   - `append` 的原子性和"回复已拿到但没写进 log"的行为（§4）；事件表补全各字段。
   - 验收补：截断后继续、`CallFailed` 的 usage、切换后暂停恢复、fork 的 fork 加跨 fork 点的压缩（§15）。
-- **S0（2026-11-21）**：`git init`（只在本地；远端仓库等 owner 决定）、pyproject（lite-model v0.4.0 以直接 URL 写进
-  元数据，与 lite-cache 相同）、ruff / mypy strict / pytest + pytest-asyncio、CI 文件（test / package / release，
-  尚未在 GitHub 上跑过）、socket 守卫、`scripts/smoke.py`、README、LICENSE、`.env.example`；workspace `AGENTS.md`
+- **S0（2026-11-21）**：`git init`（当时只在本地；S1 之后 owner 决定公开）、pyproject（lite-model v0.4.0 以直接 URL 写进
+  元数据，与 lite-cache 相同）、ruff / mypy strict / pytest + pytest-asyncio、CI 文件（test / package / release；
+  仓库公开后第一次在 GitHub 上运行，通过）、socket 守卫、`scripts/smoke.py`、README、LICENSE、`.env.example`；workspace `AGENTS.md`
   已更新。检查：ruff、ruff format、mypy 干净，pytest 4 passed（含 review 后加的一条）；最初的三个测试各见过一次红（去掉 socket 守卫；把元数据里
   的 lite-model URL 换成裸名字；对着 lite-model 0.3.0 跑 tool 轮次的测试是 ImportError）；本地按 CI `package` job 的
   步骤从 wheel 装进干净的 venv 并跑通 smoke。没有跑 `/simplify`：这一阶段没有产品代码。

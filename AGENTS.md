@@ -26,8 +26,8 @@ If a change must contradict the design, update the design in the same change and
 ## Current stage
 
 **S1 done 2026-11-21: events, the in-memory store, the projection, the loop and `Agent.run`** (design §3–§5;
-the rule → test table is in design §15 "阶段记录"). Local repository only: no GitHub remote yet (owner,
-2026-11-21), so CI has not run. Next: S2 (tools with validation, budgets, gates, pause / resume,
+the rule → test table is in design §15 "阶段记录"). Public at github.com/ArthurGao/lite-agent since 2026-11-21;
+CI runs there. Next: S2 (tools with validation, budgets, gates, pause / resume,
 `fallback_role`).
 
 ## Rules
