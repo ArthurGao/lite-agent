@@ -39,6 +39,9 @@ class Agent:
         repeated = sorted({n for n in names if names.count(n) > 1})
         if repeated:
             raise ValueError(f"tool names must be unique: {', '.join(repeated)}")
+        if external := [t.name for t in self.tools if t.external]:
+            # until pause / resume exists (S2b) nothing could hand the call to the host
+            raise ValueError(f"external tools are not supported yet: {', '.join(external)}")
 
     def tool(self, name: str) -> Tool | None:
         return next((t for t in self.tools if t.name == name), None)

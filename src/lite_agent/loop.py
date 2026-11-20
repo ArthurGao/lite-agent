@@ -1,13 +1,14 @@
 """One run: the tool loop over the log (design §5). Every step appends events and the next
 request is derived from them; the loop keeps no message list of its own."""
 
+import asyncio
 from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING
 
 from lite_model import ModelError, ToolCall, Usage
 
-from lite_agent.budget import add_usage
+from lite_agent.budget import add_usage, spent
 from lite_agent.errors import HarnessError, StoreError, UnknownSession, UnresolvedCalls
 from lite_agent.events import (
     ErrorKind,
@@ -42,31 +43,15 @@ UNKNOWN_TOOL = "There is no tool named {name!r}. Nothing was executed."
 BAD_ARGUMENTS = (
     "The arguments were not a valid JSON object. Nothing was executed: send the call again."
 )
+TIMED_OUT = (
+    "The tool did not finish within {seconds:g} seconds and was stopped. It may or may not have "
+    "taken effect: check before trying it again."
+)
+CUT = "\n[truncated: the first {kept} of {total} characters]"
 
 # An event still missing its envelope: `partial(RunFinished, outcome=..., ...)`. `_Run.append`
 # supplies session, seq, time and run when the batch is written.
 Pending = Callable[..., Event]
-
-
-def _answer(
-    call: ToolCall,
-    content: str,
-    *,
-    error: ErrorKind | None = None,
-    executed: bool,
-    terminal: bool = False,
-) -> Pending:
-    """The one place a tool result is built, executed or not."""
-    return partial(
-        ToolResultEvent,
-        call_id=call.id,
-        content=content,
-        is_error=error is not None,
-        error_kind=error,
-        executed=executed,
-        terminal=terminal,
-        original_chars=len(content),
-    )
 
 
 class _Run:
@@ -112,9 +97,43 @@ class _Run:
             raise HarnessError("the stored log does not project to the request this run built")
         return built
 
-    def turns_used(self) -> int:
-        """Model calls the session has made, failed ones included (§5 rule 6)."""
-        return sum(isinstance(e, ModelTurn | ModelErrorEvent) for e in self.log)
+    def over_budget(self) -> StopReason | None:
+        """The budget the session has used up, if any: checked before a model call, so the call
+        that would exceed it is never made (§5 rule 6)."""
+        budget, used = self.agent.budget, spent(self.log)
+        if used.turns >= budget.turns:
+            return "budget_turns"
+        if budget.tokens is not None and used.tokens >= budget.tokens:
+            return "budget_tokens"
+        if budget.cost_usd is not None and used.cost_usd >= budget.cost_usd:
+            return "budget_cost"
+        return None
+
+    def answer(
+        self,
+        call: ToolCall,
+        content: str,
+        *,
+        error: ErrorKind | None = None,
+        executed: bool,
+        terminal: bool = False,
+    ) -> Pending:
+        """The one place a tool result is built, executed or not. A result longer than the
+        budget is cut here, before it is written, so the log holds exactly what the model is
+        shown (§4)."""
+        total, limit = len(content), self.agent.budget.tool_result_chars
+        if total > limit:
+            content = content[:limit] + CUT.format(kept=limit, total=total)
+        return partial(
+            ToolResultEvent,
+            call_id=call.id,
+            content=content,
+            is_error=error is not None,
+            error_kind=error,
+            executed=executed,
+            terminal=terminal,
+            original_chars=total,
+        )
 
     # --- steps ---
 
@@ -141,38 +160,49 @@ class _Run:
         )
         return self.result(outcome, stop, text=text, error=error)
 
+    async def refuse(self, call: ToolCall, why: str) -> bool:
+        """Answer a call that will not be executed; nothing was started."""
+        await self.append(self.answer(call, why, error="invalid_args", executed=False))
+        return False
+
     async def execute(self, call: ToolCall) -> bool:
         """One call: refused without a `tool_started`, or started, run and answered (§8). Returns
-        whether its result is terminal. A tool's exception is a result for the model, not a
-        failure of the run (§5 rule 7)."""
+        whether its result is terminal. A tool's exception or timeout is a result for the model,
+        not a failure of the run (§5 rules 7 and 10)."""
         tool = self.agent.tool(call.name)
         if tool is None:
-            content = UNKNOWN_TOOL.format(name=call.name)
-            await self.append(_answer(call, content, error="invalid_args", executed=False))
-            return False
+            return await self.refuse(call, UNKNOWN_TOOL.format(name=call.name))
         if call.arguments is None:
-            await self.append(_answer(call, BAD_ARGUMENTS, error="invalid_args", executed=False))
-            return False
+            return await self.refuse(call, BAD_ARGUMENTS)
+        if (problem := tool.validate(call.arguments)) is not None:
+            return await self.refuse(call, problem)
         arguments = dict(call.arguments)
         await self.append(
             partial(ToolStarted, call_id=call.id, name=call.name, arguments=arguments)
         )
+        seconds = self.agent.budget.tool_timeout_s if tool.timeout_s is None else tool.timeout_s
         try:
-            content = await tool(arguments, ToolContext(self.session_id, self.run_id, call.id))
+            async with asyncio.timeout(seconds) as deadline:
+                content = await tool(arguments, ToolContext(self.session_id, self.run_id, call.id))
+            if deadline.expired():  # the tool swallowed its cancellation and returned anyway
+                raise TimeoutError
             if not isinstance(content, str):
                 raise TypeError(f"tool returned {type(content).__name__}, not str")
         except Exception as exc:
-            failure = f"{type(exc).__name__}: {exc}"
-            await self.append(_answer(call, failure, error="exception", executed=True))
+            kind: ErrorKind = "exception"
+            text = f"{type(exc).__name__}: {exc}"
+            if deadline.expired():  # ours, not a TimeoutError the tool raised itself
+                kind, text = "timeout", TIMED_OUT.format(seconds=seconds)
+            await self.append(self.answer(call, text, error=kind, executed=True))
             return False
-        await self.append(_answer(call, content, executed=True, terminal=tool.terminal))
+        await self.append(self.answer(call, content, executed=True, terminal=tool.terminal))
         return tool.terminal
 
     async def loop(self) -> RunResult:
         agent = self.agent
         while True:
-            if self.turns_used() >= agent.budget.turns:  # before the call that would exceed it
-                return await self.finish("failed", "budget_turns")
+            if (used_up := self.over_budget()) is not None:
+                return await self.finish("failed", used_up)
             request = await self.projection()
             try:
                 reply = await agent.model.turn(agent.role, request.messages, request.tools)
@@ -199,7 +229,7 @@ class _Run:
             if reply.stop == "length" and calls:
                 # §5 rule 1: none of a cut-off turn's calls runs, and each still gets its result
                 refusals = (
-                    _answer(c, TRUNCATED, error="truncated_turn", executed=False) for c in calls
+                    self.answer(c, TRUNCATED, error="truncated_turn", executed=False) for c in calls
                 )
                 await self.append(turn, *refusals)
                 continue

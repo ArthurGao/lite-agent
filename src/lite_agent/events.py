@@ -15,8 +15,16 @@ from lite_agent.errors import EventRejected
 V = 1  # the vocabulary version this code reads and writes
 
 Outcome = Literal["completed", "failed", "paused"]
-StopReason = Literal["end_turn", "terminal_tool", "budget_turns", "truncated", "error"]
-ErrorKind = Literal["invalid_args", "exception", "truncated_turn"]
+StopReason = Literal[
+    "end_turn",
+    "terminal_tool",
+    "budget_turns",
+    "budget_tokens",
+    "budget_cost",
+    "truncated",
+    "error",
+]
+ErrorKind = Literal["invalid_args", "exception", "timeout", "truncated_turn"]
 
 
 class _Frozen(BaseModel):
