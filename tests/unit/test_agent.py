@@ -5,7 +5,7 @@ import dataclasses
 import pytest
 from lite_model.testing import AsyncFakeModel
 
-from lite_agent import Agent, Budget, InMemorySessionStore, InProcessRunner, RunResult
+from lite_agent import Agent, Budget, InMemorySessionStore, InProcessRunner, Resume, RunResult
 from tests.helpers import Recording, agent, events_of, kinds, say
 
 
@@ -64,12 +64,12 @@ async def test_every_run_opens_with_run_started_and_ids_come_from_the_agent() ->
 
 
 async def test_a_custom_runner_receives_the_agent_the_session_and_the_task() -> None:
-    seen: list[tuple[Agent, str | None, str]] = []
+    seen: list[tuple[Agent, str | None, str | Resume]] = []
 
     class Spy(InProcessRunner):
-        async def run(self, agent: Agent, session_id: str | None, task: str) -> RunResult:
-            seen.append((agent, session_id, task))
-            return await super().run(agent, session_id, task)
+        async def run(self, agent: Agent, session_id: str | None, input: str | Resume) -> RunResult:
+            seen.append((agent, session_id, input))
+            return await super().run(agent, session_id, input)
 
     a = agent(AsyncFakeModel(agent=[say("Noon.")]), runner=Spy())
     await a.run("Time?")

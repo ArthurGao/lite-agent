@@ -294,13 +294,12 @@ def test_a_tool_timeout_must_be_positive(timeout_s: float) -> None:
         tool(description="T.", timeout_s=timeout_s)(get_weather.fn)
 
 
-def test_an_external_tool_is_refused_until_runs_can_pause() -> None:
-    # S2a: `external` is on the protocol, but nothing can hand a call to the host before S2b.
+def test_an_agent_takes_an_external_tool() -> None:
+    # S2a refused these until runs could pause; S2b lifted that (tests/unit/test_pause_resume.py).
     plain = Recording().tool("plain")
     assert isinstance(plain, FunctionTool)
     remote = FunctionTool("remote", "Remote.", {"type": "object"}, plain.fn, external=True)
-    with pytest.raises(ValueError, match="external tools are not supported yet: remote"):
-        agent(AsyncFakeModel(), remote)
+    assert agent(AsyncFakeModel(), remote).tools == (remote,)
 
 
 async def test_a_tool_that_swallows_its_cancellation_is_still_a_timeout() -> None:

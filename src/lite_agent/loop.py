@@ -6,7 +6,7 @@ from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING
 
-from lite_model import ModelError, ToolCall, Usage
+from lite_model import AssistantTurn, ModelError, ToolCall, Usage
 
 from lite_agent.budget import add_usage, spent
 from lite_agent.errors import HarnessError, StoreError, UnknownSession, UnresolvedCalls
@@ -15,7 +15,10 @@ from lite_agent.events import (
     Event,
     ModelErrorEvent,
     ModelTurn,
+    Origin,
     Outcome,
+    Paused,
+    Resumed,
     RunFinished,
     RunStarted,
     SessionStarted,
@@ -28,9 +31,10 @@ from lite_agent.events import (
     provenance_data,
     usage_data,
 )
-from lite_agent.projection import Projection, derive, unanswered_calls
-from lite_agent.result import RunError, RunResult
-from lite_agent.tools import ToolContext
+from lite_agent.gates import Allow, Deny, PauseFor, RunContext
+from lite_agent.projection import Projection, derive, last_turn, unanswered_calls
+from lite_agent.result import Pause, Resume, RunError, RunResult, ToolOutcome, Waiting
+from lite_agent.tools import Tool, ToolContext
 
 if TYPE_CHECKING:
     from lite_agent.agent import Agent
@@ -48,6 +52,9 @@ TIMED_OUT = (
     "taken effect: check before trying it again."
 )
 CUT = "\n[truncated: the first {kept} of {total} characters]"
+NOT_APPROVED = "The call was not approved. Nothing was executed."
+DENIED = "The call was refused: {reason} Nothing was executed."
+GATE_FAILED = "The gate {gate!r} could not decide ({error}). Nothing was executed."
 
 # An event still missing its envelope: `partial(RunFinished, outcome=..., ...)`. `_Run.append`
 # supplies session, seq, time and run when the batch is written.
@@ -117,6 +124,7 @@ class _Run:
         error: ErrorKind | None = None,
         executed: bool,
         terminal: bool = False,
+        origin: Origin = "executed",
     ) -> Pending:
         """The one place a tool result is built, executed or not. A result longer than the
         budget is cut here, before it is written, so the log holds exactly what the model is
@@ -131,6 +139,7 @@ class _Run:
             is_error=error is not None,
             error_kind=error,
             executed=executed,
+            origin=origin,
             terminal=terminal,
             original_chars=total,
         )
@@ -144,8 +153,11 @@ class _Run:
         *,
         text: str | None = None,
         error: RunError | None = None,
+        pause: Pause | None = None,
     ) -> RunResult:
-        return RunResult(self.session_id, self.run_id, outcome, stop, text, error, self.usage)
+        return RunResult(
+            self.session_id, self.run_id, outcome, stop, text, error, self.usage, pause
+        )
 
     async def finish(
         self,
@@ -154,32 +166,24 @@ class _Run:
         *,
         text: str | None = None,
         error: RunError | None = None,
+        pause: Pause | None = None,
     ) -> RunResult:
         await self.append(
             partial(RunFinished, outcome=outcome, stop=stop, usage=usage_data(self.usage))
         )
-        return self.result(outcome, stop, text=text, error=error)
+        return self.result(outcome, stop, text=text, error=error, pause=pause)
 
-    async def refuse(self, call: ToolCall, why: str) -> bool:
+    # --- one tool call (§8) ---
+
+    async def refuse(self, call: ToolCall, why: str, kind: ErrorKind = "invalid_args") -> bool:
         """Answer a call that will not be executed; nothing was started."""
-        await self.append(self.answer(call, why, error="invalid_args", executed=False))
+        await self.append(self.answer(call, why, error=kind, executed=False))
         return False
 
-    async def execute(self, call: ToolCall) -> bool:
-        """One call: refused without a `tool_started`, or started, run and answered (§8). Returns
-        whether its result is terminal. A tool's exception or timeout is a result for the model,
-        not a failure of the run (§5 rules 7 and 10)."""
-        tool = self.agent.tool(call.name)
-        if tool is None:
-            return await self.refuse(call, UNKNOWN_TOOL.format(name=call.name))
-        if call.arguments is None:
-            return await self.refuse(call, BAD_ARGUMENTS)
-        if (problem := tool.validate(call.arguments)) is not None:
-            return await self.refuse(call, problem)
-        arguments = dict(call.arguments)
-        await self.append(
-            partial(ToolStarted, call_id=call.id, name=call.name, arguments=arguments)
-        )
+    async def run_tool(self, tool: Tool, call: ToolCall, arguments: dict[str, object]) -> bool:
+        """Run a started call and write its result; returns whether the result is terminal. A
+        tool's exception or timeout is a result for the model, not a failure of the run (§5
+        rules 7 and 10)."""
         seconds = self.agent.budget.tool_timeout_s if tool.timeout_s is None else tool.timeout_s
         try:
             async with asyncio.timeout(seconds) as deadline:
@@ -197,6 +201,112 @@ class _Run:
             return False
         await self.append(self.answer(call, content, executed=True, terminal=tool.terminal))
         return tool.terminal
+
+    async def recover(
+        self, call: ToolCall, started: ToolStarted, outcome: ToolOutcome | None
+    ) -> bool | Waiting:
+        """A call an earlier run got as far as starting. With the host's `outcome` for it, write
+        that; otherwise wait for it, or run it again when the tool says that is safe (§8)."""
+        tool = self.agent.tool(call.name)
+        if outcome is not None:
+            kind: ErrorKind | None = None
+            if outcome.unknown:
+                kind = "outcome_unknown"
+            elif outcome.is_error:
+                kind = "exception"
+            terminal = kind is None and tool is not None and tool.terminal
+            origin: Origin = "external" if started.external else "reconciled"
+            reported = self.answer(
+                call, outcome.content, error=kind, executed=True, terminal=terminal, origin=origin
+            )
+            await self.append(reported)
+            return terminal
+        if started.external:
+            return Waiting(call.id, "tool")
+        # Safe to run again only if the tool says so and still takes these arguments; the same
+        # call id is its dedup key. Anything else may have taken effect: a person checks.
+        if tool is not None and tool.idempotent and tool.validate(started.arguments) is None:
+            return await self.run_tool(tool, call, started.arguments)
+        return Waiting(call.id, "reconcile")
+
+    async def admit(self, call: ToolCall, approved: bool | None) -> bool | Waiting:
+        """A call nothing has been done about yet: refuse it, wait for a person, or start it.
+        `approved` is a person's answer from `resume()`: it stands in for the gates."""
+        tool = self.agent.tool(call.name)
+        if approved is False:
+            return await self.refuse(call, NOT_APPROVED, "denied")
+        if tool is None:
+            return await self.refuse(call, UNKNOWN_TOOL.format(name=call.name))
+        if call.arguments is None:
+            return await self.refuse(call, BAD_ARGUMENTS)
+        if (problem := tool.validate(call.arguments)) is not None:
+            return await self.refuse(call, problem)
+        if approved is None and self.agent.gates:
+            # built per call: a gate sees what the calls before this one did (§5 rule 10)
+            context = RunContext(self.session_id, self.run_id, tuple(self.log))
+            for gate in self.agent.gates:
+                # Fail closed: a gate that raises, or answers with anything but a decision, has
+                # not given permission. The call is refused and the run goes on (§5 rule 7).
+                try:
+                    decision = await gate.check(call, context)
+                    failure = (
+                        None if isinstance(decision, Allow | Deny | PauseFor) else "no decision"
+                    )
+                except Exception as exc:
+                    decision, failure = None, type(exc).__name__
+                if failure is not None:
+                    why = GATE_FAILED.format(gate=gate.name, error=failure)
+                    return await self.refuse(call, why, "denied")
+                if isinstance(decision, Deny):
+                    return await self.refuse(call, DENIED.format(reason=decision.reason), "denied")
+                if isinstance(decision, PauseFor):
+                    return Waiting(call.id, "approval", decision.reason, gate.name)
+        arguments = dict(call.arguments)
+        await self.append(
+            partial(
+                ToolStarted,
+                call_id=call.id,
+                name=call.name,
+                arguments=arguments,
+                external=tool.external,
+            )
+        )
+        if tool.external:
+            return Waiting(call.id, "tool")
+        return await self.run_tool(tool, call, arguments)
+
+    async def settle_turn(self, given: Resume | None = None) -> RunResult | None:
+        """Settle every call of the last turn that has no result yet, in order: the same steps
+        for a fresh turn and for a resumed one. A call that must wait does not hold up the
+        others; if any waits, the run ends as paused. `given` is what `resume()` brought for
+        this turn's calls and reaches no later turn. Returns the run's result, or None to go on
+        with the next model call."""
+        given = given or Resume()
+        turn = last_turn(self.log)
+        assert turn is not None
+        terminal = {call_id: result.terminal for call_id, result in turn.results.items()}
+        waiting: list[Waiting] = []
+        for call in turn.calls:
+            if call.id in terminal:
+                continue
+            approved = given.approve.get(call.id)
+            if (started := turn.started.get(call.id)) is not None:
+                settled = await self.recover(call, started, given.results.get(call.id))
+            elif approved is None and call.id in turn.awaiting:
+                settled = turn.awaiting[call.id]  # still a person's to decide: no gate is asked
+            else:
+                settled = await self.admit(call, approved)
+            if isinstance(settled, Waiting):
+                waiting.append(settled)
+            else:
+                terminal[call.id] = settled
+        text = turn.text or None
+        if waiting:
+            await self.append(partial(Paused, waiting=tuple(waiting)))
+            return await self.finish("paused", "paused", text=text, pause=Pause(tuple(waiting)))
+        if all(terminal.values()):  # §5 rule 2: the whole batch, or go on
+            return await self.finish("completed", "terminal_tool", text=text)
+        return None
 
     async def loop(self) -> RunResult:
         agent = self.agent
@@ -226,6 +336,15 @@ class _Run:
             )
             calls = reply.turn.tool_calls
             text = reply.turn.text or None
+            if len({c.id for c in calls}) != len(calls):
+                # results are matched to calls by id: two calls with one id cannot both be
+                # answered, so the turn is unusable and nothing of it is recorded as a turn
+                usage = usage_data(reply.usage)
+                name = "DuplicateCallIds"
+                await self.append(
+                    partial(ModelErrorEvent, error=name, role=agent.role, usage=usage)
+                )
+                return await self.finish("failed", "error", error=RunError("model", name))
             if reply.stop == "length" and calls:
                 # §5 rule 1: none of a cut-off turn's calls runs, and each still gets its result
                 refusals = (
@@ -234,35 +353,69 @@ class _Run:
                 await self.append(turn, *refusals)
                 continue
             await self.append(turn)
-            if reply.stop == "length":  # cut-off text: nothing to answer, no way to go on yet (S2)
+            if reply.stop == "length":  # cut-off text: nothing to answer, no way to go on yet (S2c)
                 return await self.finish("failed", "truncated", text=text)
             if not calls:
                 return await self.finish("completed", "end_turn", text=text)
-            # in order, one at a time (design §16); §5 rule 2: the whole batch, or go on
-            if all([await self.execute(c) for c in calls]):
-                return await self.finish("completed", "terminal_tool", text=text)
+            if (ended := await self.settle_turn()) is not None:
+                return ended
 
 
-async def run_loop(agent: "Agent", session_id: str | None, task: str) -> RunResult:
-    """Run `task` in a new session (`session_id=None`) or as the next run of an existing one.
-    Raises UnknownSession, or UnresolvedCalls for a session an interrupted run left mid-call.
-    A failure of the harness itself (the store, the projection invariant) ends the run without
-    another write: the log is exactly what was stored before it."""
+def _check_resume(log: list[Event], given: Resume) -> None:
+    """Raises ValueError, before anything is written, for a `Resume` that does not fit the
+    session: a decision or a result for a call that is not waiting for one, or nothing to do."""
+    turn = last_turn(log)
+    waiting = turn.unanswered if turn is not None else ()
+    started = turn.started if turn is not None else {}
+    for call_id in given.approve:
+        if call_id not in waiting or call_id in started:
+            raise ValueError(f"call {call_id} is not waiting for approval")
+    for call_id in given.results:
+        if call_id not in waiting or call_id not in started:
+            raise ValueError(f"call {call_id} is not waiting for a result")
+    if not waiting:
+        # Nothing to settle: only a run that failed or was interrupted before its next model
+        # call can be sent again. A run that completed is over, and a history that ends with
+        # the assistant's own words has nothing left to answer.
+        done = log and isinstance(log[-1], RunFinished) and log[-1].outcome == "completed"
+        last = derive(log).messages[-1:]
+        if done or not last or isinstance(last[0], AssistantTurn):
+            raise ValueError("nothing to resume: the session's last run is complete")
+
+
+async def run_loop(agent: "Agent", session_id: str | None, input: str | Resume) -> RunResult:
+    """Run a task in a new session (`session_id=None`) or as the next run of an existing one, or
+    resume a session (design §8). Raises UnknownSession; UnresolvedCalls for a task sent to a
+    session whose last turn still has unanswered calls; ValueError for a `Resume` that does not
+    fit. A failure of the harness itself (the store, the projection invariant) ends the run
+    without another write: the log is exactly what was stored before it."""
+    given = input if isinstance(input, Resume) else None
+    if given is not None and session_id is None:
+        raise ValueError("resume() needs a session")
     run = _Run(agent, session_id or agent.ids(), agent.ids())
     tools = tuple(ToolDef.model_validate(t, from_attributes=True) for t in agent.tools)
     opening: list[Pending] = [
-        partial(RunStarted, role=agent.role, system=agent.system, tools=tools),
-        partial(UserMessage, text=task),
+        partial(RunStarted, role=agent.role, system=agent.system, tools=tools)
     ]
     try:
         if session_id is None:
             opening.insert(0, SessionStarted)
         else:
             run.log = await run.read()
-            if open_calls := unanswered_calls(run.log):
-                # an interrupted run: the caller's to settle, like UnknownSession (§8)
-                raise UnresolvedCalls(run.session_id, open_calls)
+        open_calls = unanswered_calls(run.log)
+        if given is not None:
+            _check_resume(run.log, given)
+            opening.append(
+                partial(Resumed, approve=dict(given.approve), results=tuple(given.results))
+            )
+        elif open_calls:
+            raise UnresolvedCalls(run.session_id, open_calls)
+        else:
+            assert isinstance(input, str)
+            opening.append(partial(UserMessage, text=input))
         await run.append(*opening)
+        if open_calls and (ended := await run.settle_turn(given)) is not None:
+            return ended
         return await run.loop()
     except UnknownSession:
         raise

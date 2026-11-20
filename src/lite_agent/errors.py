@@ -24,13 +24,15 @@ class UnknownSession(StoreError):
 
 
 class UnresolvedCalls(AgentError):
-    """The session's last turn asked for tool calls that have no result: a run was interrupted
-    between a call and its answer. Sending that history would be rejected, and a tool that may
-    already have run must not be repeated blindly, so `run()` refuses the session (design §8;
-    S2's `resume()` settles each call)."""
+    """The session's last turn asked for tool calls that have no result: the run paused, or was
+    interrupted between a call and its answer. A new task cannot be sent on top of that (the
+    request would be rejected); `resume()` settles each call first (design §8)."""
 
     def __init__(self, session_id: str, call_ids: tuple[str, ...]) -> None:
-        super().__init__(f"session {session_id} has unanswered tool calls: {', '.join(call_ids)}")
+        waiting = ", ".join(call_ids)
+        super().__init__(
+            f"session {session_id} has unanswered tool calls ({waiting}): use resume()"
+        )
         self.session_id = session_id
         self.call_ids = call_ids
 
