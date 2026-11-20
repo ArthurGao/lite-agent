@@ -1,24 +1,42 @@
 # lite-agent
 
-**Status: S1.** The core runs: a tool loop over a
+**Status: S2a** (stage plan: design §15). The core runs: a tool loop over a
 [lite-model](https://github.com/ArthurGao/lite-model) role, every step recorded in an append-only
-event log, and each request derived from that log. Sessions live in memory only; validation of tool
-arguments, approval gates, pausing, compaction and a persistent store are later stages.
+event log, and each request derived from that log. Tool arguments are validated, results are cut to
+a budget, and turn, token and cost budgets stop a session. Sessions live in memory only; approval
+gates, pausing, compaction and a persistent store are later stages. Not released yet.
 
 ```python
-from lite_agent import Agent, FunctionTool
+import asyncio
 
-async def get_time(args, ctx):
+from lite_model import ModelsConfig, RolePolicy, RoleSpec, build_async
+from pydantic import BaseModel
+
+from lite_agent import Agent, ToolContext, tool
+
+
+class Where(BaseModel):
+    city: str
+
+
+@tool(description="Current local time in a city.")
+async def get_time(args: Where, ctx: ToolContext) -> str:
     return "12:00"
 
-agent = Agent(
-    role="agent",                      # a lite-model role
-    model=model,                       # lite_model.build_async(config, roles)
-    tools=[FunctionTool("get_time", "Current local time.", {"type": "object"}, get_time)],
-)
-result = await agent.run("What time is it?")
-result.outcome, result.text            # "completed", "..."
-await agent.sessions.read(result.session_id)   # the events
+
+async def main() -> None:
+    # any lite-model configuration; this one is a local Ollama model that can call tools
+    config = ModelsConfig(backend="ollama", model="qwen3:8b")
+    model = build_async(config, RoleSpec({"agent": RolePolicy()}))
+    agent = Agent(role="agent", model=model, tools=[get_time])
+
+    result = await agent.run("What time is it in Paris?")
+    print(result.outcome, result.text)                        # completed ...
+    for event in await agent.sessions.read(result.session_id):
+        print(event.seq, event.type)                          # the log
+
+
+asyncio.run(main())
 ```
 
 The design, its decisions and the stage plan are in [`docs/lite-agent-design.md`](docs/lite-agent-design.md) (Chinese). License: Apache-2.0.

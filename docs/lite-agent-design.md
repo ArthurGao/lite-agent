@@ -119,13 +119,28 @@ class SessionStore(Protocol):
     async def read(self, session_id: str, *, upto_seq: int | None = None) -> Sequence[Event]: ...
     async def fork(self, session_id: str, *, at_seq: int) -> str: ...
 
-class Tool(Protocol):                           # all four are read-only properties
+class Tool(Protocol):                           # the attributes are read-only properties
     name: str
     description: str
     parameters: Mapping[str, Any]               # JSON Schema of the input, sent to the model as is
     terminal: bool                              # a successful result may end the run (§5 rule 2)
+    idempotent: bool                            # S2a: safe to run again with the same call_id (§8)
+    timeout_s: float | None                     # S2a: None = Budget.tool_timeout_s
+    external: bool                              # S2a (used from S2b): the host executes it
+    def validate(self, args: Mapping[str, Any]) -> str | None: ...   # S2a: what is wrong, or None
     async def __call__(self, args: Mapping[str, Any], ctx: ToolContext) -> str: ...
-    # S2: idempotent, timeout_s, external; `@tool` validates args against a Pydantic model
+
+def tool(*, description, name=None, terminal=False, idempotent=False, timeout_s=None):   # S2a
+    """Decorates `async def f(args: SomeModel, ctx: ToolContext) -> str` into a ModelTool."""
+
+@dataclass(frozen=True)
+class Budget:                                   # S2a; turns / tokens / cost_usd are the session's
+    turns: int = 30
+    tokens: int | None = None                   # input + output
+    cost_usd: float | None = None
+    tool_result_chars: int = 20_000
+    tool_timeout_s: float = 60.0
+    auto_continues: int = 2                     # per run (S2c)
 
 class Gate(Protocol):                           # S2: runs before a tool call executes
     name: str
@@ -137,8 +152,9 @@ class Runner(Protocol):                         # where the loop's steps execute
 
 - `run(task)` 开一个新 session；`run(task, session_id=…)` 是那个 session 的下一次 run（多轮对话），不存在的
   session 抛 `UnknownSession`。`Runner.run` 的 `session_id=None` 表示新 session。
-- `Tool` 用 JSON Schema 字典而不是 Pydantic 模型：loop 只需要把定义交给模型、把参数交给函数。S2 的 `@tool`
-  从 Pydantic 模型生成这个字典并在调用前校验。`FunctionTool` 是包一个 async 函数的实现。
+- `Tool` 用 JSON Schema 字典而不是 Pydantic 模型：loop 只需要把定义交给模型、把参数交给函数。两个实现：
+  `@tool`（S2a）做出 `ModelTool`——schema 是模型的 `model_json_schema()`，`validate()` 用 Pydantic 校验，函数拿到的
+  是模型实例；`FunctionTool` 包一个拿原始参数的 async 函数，不校验。
 - `RunResult.error`：run 自己的失败。模型调用失败是 `model`（log 里有 `model_error`）；store 读写失败是 `store`、
   投影不变量不成立是 `harness`，这两种不再写 log（§4）。不是 `ModelError` 的异常（宿主或测试的 bug）原样抛出。
 - `@tool` 装饰器把一个带类型标注的函数变成 `Tool`（schema 来自参数的 Pydantic 模型）。
@@ -202,7 +218,10 @@ class Runner(Protocol):                         # where the loop's steps execute
 - **并发**：`append` 带 `expected_seq`，不匹配就拒绝（同一 session 只能有一个写入者）。一次 `append` 的
   一批事件要么全写入、要么全不写。模型已经回复但 `append` 失败时，run 失败，这个回复丢掉（钱已经花了，
   log 里没有它）；`resume` 会重发这一轮。
-- tool 结果过大时在写入 `tool_result` 前截断，事件里记原始长度；完整结果要不要另存见 §16。
+- tool 结果超过 `Budget.tool_result_chars` 时在写入 `tool_result` 前截断，末尾加一行
+  `[truncated: the first N of M characters]`，`original_chars` 记原长度。预算管的是保留下来的原文长度，说明那
+  一行另算（所以存下来的内容比预算多几十个字符）；log 里存的就是模型看到的。出错信息同样
+  处理。完整结果要不要另存见 §16。
 
 ## 5. Loop 规则
 
@@ -225,7 +244,8 @@ class Runner(Protocol):                         # where the loop's steps execute
    调用会超出预算时在调用前停，`outcome=failed`、`stop=budget_*`（任务没做完，不算 completed；KB §7.2）。`turns`、`tokens`、`cost_usd` 按**整个
    session** 算，每次从 log 合计（暂停再恢复不会得到一份新预算；fork 出来的 session 包含继承的前缀）。
    `auto_continues` 按 run 算。拿不到 usage 的调用（`CallFailed`）记 `None`、不估算，token 预算里按 0 计，
-   turn 预算照算。压缩调用计入 token 和成本，不计入 turn。
+   turn 预算照算。压缩调用计入 token 和成本，不计入 turn。检查的是"已经用掉的是否达到预算"：token 是每次
+   调用的 input + output 之和，下一次调用会用多少事先不知道，所以最后一次调用可以超出一点，之后不再调用。
 7. tool 抛的异常变成 `is_error` 的 `tool_result` 送回模型；`Gate` 的 `Deny` 同样。只有 harness 自己的错误
    （store 写失败、投影不变量不成立）才让 run 失败。
 8. 同一轮里的多个 tool call 默认顺序执行；并行执行见 §16。
@@ -235,7 +255,8 @@ class Runner(Protocol):                         # where the loop's steps execute
    log 的最后是 `model_error`（投影不包含它），
    `resume(session_id)` 重发这一轮，之前的 tool 不重跑。超时的调用拿不到 usage（`None`），事件里
    如实记 `None`，不估算。durable runner（§9）可以用更长的重试策略并尊重 Retry-After，那是 runner 的事。
-10. **tool 超时**：每个 tool 有 `timeout_s`（默认 `Budget.tool_timeout_s`）。超时写 `tool_result`，
+10. **tool 超时**：每个 tool 有 `timeout_s`（默认 `Budget.tool_timeout_s`，60 秒）。超时时这次调用被取消（tool
+    自己抛的 `TimeoutError` 不算，是普通的 `exception`），写 `tool_result`，
     `error_kind=timeout`、`executed=True`，内容写明"是否已生效未知，不要直接重试"。它和"没有执行"
     （`invalid_args`、`denied`、`truncated_turn`，`executed=False`）是不同的结果，模型和宿主都分得清。
     同一个 `call_id` 不会再执行。模型想重试，只能发一个新的 call（新的 `call_id`），它照常过 gate；gate
@@ -286,8 +307,9 @@ class Runner(Protocol):                         # where the loop's steps execute
 
 - 来源三种：宿主的 Python 函数（`@tool`，S2）；MCP server（`lite-agent[mcp]`，作 client，把远端 tool 映射成
   `Tool`）和兄弟模块的 adapter（`lite-agent[rag]`：`search_kb`）——后两种按需做（§15）。
-- 参数先过 Pydantic 校验；校验失败写 `tool_result`（`error_kind=invalid_args`、`executed=False`），不写
-  `tool_started`，不调用 tool。未知的 tool 名同样处理。
+- 参数先过 `Tool.validate()`（`@tool` 是 Pydantic 校验）；有问题就写 `tool_result`（`error_kind=invalid_args`、
+  `executed=False`），不写 `tool_started`，不调用 tool。内容是字段路径和 Pydantic 给的原因，**不带输入的值**
+  （可能很大）。宿主自己写的 validator 消息原样送回模型，里面放什么由宿主负责。未知的 tool 名、不是 JSON 对象的参数同样处理。
 - tool 数量保持小，按意图分组（KB §14.3）。tool 的完整定义在 `run_started` 里（§4），两次 run 之间变了，
   log 里看得出来（影响 prompt cache 和可复现性）。
 - **外部执行的 tool**（`external=True`；HTTP 壳的"客户端执行 tool"用它，§10）。事件顺序：校验 → gate →
@@ -514,6 +536,28 @@ docs/lite-agent-design.md
     "usage 合计掩盖了未知的部分"（§5 规则 6：未知不估算、不计入）；"`derive()` 应校验任意 log 的结构"（log 只由
     loop 写，能到达的坏状态由 `UnresolvedCalls` 拦住）；非 JSON 值的往返测试（参数来自 JSON 解析，opaque 来自 SDK
     的 `to_dict()`）。
+- **S2a（2026-11-21）**：`@tool` / `ModelTool`、`Tool.validate` / `idempotent` / `timeout_s` / `external`、结果截断、
+  tool 超时、token 和成本预算（`budget.spent()` 从 log 合计）。测试先写、先红（`tests/unit/test_tools.py`）。
+  - 规则 → 测试：校验（§7）`test_invalid_arguments_are_answered_before_anything_is_started_or_run`、
+    `test_validate_says_what_is_wrong_without_echoing_the_input`；截断（§4）
+    `test_a_long_result_is_cut_when_written_and_the_original_length_is_kept`；超时（§5 规则 10）
+    `test_a_tool_that_overruns_its_timeout_is_answered_as_a_timeout_and_the_run_goes_on`、
+    `test_a_tool_raising_timeout_error_itself_is_an_ordinary_failure`；预算（§5 规则 6）
+    `test_the_token_budget_stops_before_the_call_after_it_is_reached`、`test_the_cost_budget_…`、
+    `test_token_and_cost_budgets_are_the_sessions_and_count_failed_calls`、
+    `test_a_call_whose_usage_is_unknown_is_not_counted_against_the_token_budget`。
+  - `/simplify`（两路，四个角度）：采纳——`_answer` 并进 `_Run.answer`；参数检查改成三个提前返回（`refuse()`）；
+    超时和异常两个分支只选值、写一次；`timeout_s` 用 `is None` 判断并在构造时校验；测试的 `results_of`、慢 tool
+    并进 `tests/helpers.py`；`external` 的 tool 在 S2b 之前构造 `Agent` 时直接拒绝（否则会被当成普通 tool 在进程内
+    执行）。留到 S2b——`execute()` 拆成"检查"和"执行并回答"两步、返回三种结果（暂停要用）；`RunFinished.usage`
+    改成从本次 run 的事件合计。不改——`FunctionTool` / `ModelTool` 的重复字段、`spent()` 每轮扫一遍 log、参数校验
+    两次（`__call__` 自己再校验一次，单独调用时才安全）。
+  - Codex 只读 review：1 High、5 Medium、2 Low。修复（回归测试先红）——吞掉取消信号后照常返回的 tool 会把超时
+    记成成功（High）；`@tool` 接受同步函数和参数个数不对的函数，到第一次调用才出错；预算和超时接受 NaN /
+    无穷大；README 的例子补全成能运行的脚本、状态改成 S2a。写明——截断的预算不含说明那一行；校验错误里宿主自己
+    写的消息原样返回。否决——"校验两次可能有副作用"（validator 有副作用是宿主的问题，见上）；"布尔值能通过整数
+    预算的检查"（Python 里 `True` 就是 1，不值得单独拦）。README 的例子原样在本机 Ollama 的 qwen3:8b 上跑通（2026-11-21）：模型调了 tool，再用结果回答，
+    log 是 `session_started` 到 `run_finished` 的 8 条事件。这是 lite-agent 第一次对着真实模型跑完整个 loop。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 

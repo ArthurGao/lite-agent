@@ -19,8 +19,8 @@ from lite_model import (
 )
 from lite_model.testing import AsyncFakeModel
 
-from lite_agent import Agent, FunctionTool, InMemorySessionStore, ToolContext
-from lite_agent.events import Event
+from lite_agent import Agent, FunctionTool, InMemorySessionStore, Tool, ToolContext
+from lite_agent.events import Event, ToolResultEvent
 
 T0 = datetime(2026, 11, 21, 12, 0, tzinfo=UTC)
 # The provenance lite-model's fake gives the "agent" role, read from the fake itself.
@@ -60,16 +60,32 @@ class Recording:
         self.contexts: list[ToolContext] = []
 
     def tool(
-        self, name: str, result: str | Exception = "ok", *, terminal: bool = False
+        self,
+        name: str,
+        result: str | Exception = "ok",
+        *,
+        terminal: bool = False,
+        delay: float = 0,
+        timeout_s: float | None = None,
     ) -> FunctionTool:
+        """`delay`: seconds the tool sleeps after noting the call (for timeout tests)."""
+
         async def fn(args: Mapping[str, Any], ctx: ToolContext) -> str:
             self.ran.append((name, dict(args)))
             self.contexts.append(ctx)
+            await asyncio.sleep(delay)
             if isinstance(result, Exception):
                 raise result
             return result
 
-        return FunctionTool(name, f"The {name} tool.", {"type": "object"}, fn, terminal=terminal)
+        return FunctionTool(
+            name,
+            f"The {name} tool.",
+            {"type": "object"},
+            fn,
+            terminal=terminal,
+            timeout_s=timeout_s,
+        )
 
 
 class Billed(AsyncFakeModel):
@@ -87,7 +103,7 @@ class Billed(AsyncFakeModel):
         return dataclasses.replace(reply, usage=self._usages.pop(0))
 
 
-def agent(model: Any, *tools: FunctionTool, **fields: Any) -> Agent:
+def agent(model: Any, *tools: Tool, **fields: Any) -> Agent:
     """An agent with fixed time and counting ids on a fresh in-memory store."""
     defaults: dict[str, Any] = {
         "role": "agent",
@@ -106,3 +122,7 @@ async def events_of(a: Agent, session_id: str) -> list[Event]:
 
 def kinds(events: Sequence[Event]) -> list[str]:
     return [e.type for e in events]
+
+
+def results_of(events: Sequence[Event]) -> list[ToolResultEvent]:
+    return [e for e in events if isinstance(e, ToolResultEvent)]

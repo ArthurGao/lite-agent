@@ -27,8 +27,9 @@ If a change must contradict the design, update the design in the same change and
 
 **S1 done 2026-11-21: events, the in-memory store, the projection, the loop and `Agent.run`** (design §3–§5;
 the rule → test table is in design §15 "阶段记录"). Public at github.com/ArthurGao/lite-agent since 2026-11-21;
-CI runs there. Next: S2 (tools with validation, budgets, gates, pause / resume,
-`fallback_role`).
+CI runs there. S2 is done in three parts (design §15): **S2a done 2026-11-21** — `@tool` with
+Pydantic validation, result truncation, tool timeouts, token and cost budgets. Next: S2b (gates, pause /
+resume), then S2c (auto-continue, `fallback_role`).
 
 ## Rules
 
