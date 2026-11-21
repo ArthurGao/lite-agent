@@ -44,11 +44,17 @@ class AgentTarget:
     name = "lite-agent"
 
     def __init__(
-        self, backend: Backend = "fake", model: str = "fake", reasoning_effort: Effort = "none"
+        self,
+        backend: Backend = "fake",
+        model: str = "fake",
+        reasoning_effort: Effort = "none",
+        temperature: float | None = None,
     ) -> None:
         self.backend = backend
         self.model = model
         self.reasoning_effort = reasoning_effort
+        # None: lite-model's default for the backend (0.0 for Ollama: greedy, what a host gets)
+        self.temperature = temperature
         self._live: AsyncToolModel | None = None
 
     @property
@@ -60,6 +66,7 @@ class AgentTarget:
             "backend": self.backend,
             "model": self.model,
             "reasoning_effort": self.reasoning_effort,
+            "temperature": self.temperature,
         }
 
     def versions(self) -> dict[str, str]:
@@ -81,7 +88,10 @@ class AgentTarget:
     async def setup(self, dataset: "Dataset") -> None:
         if self.backend == "ollama":
             config = ModelsConfig(
-                backend="ollama", model=self.model, reasoning_effort=self.reasoning_effort
+                backend="ollama",
+                model=self.model,
+                reasoning_effort=self.reasoning_effort,
+                temperature=self.temperature,
             )
             self._live = build_async(config, ROLES)
 
@@ -106,10 +116,13 @@ class AgentTarget:
 
 
 def agent(
-    backend: Backend = "fake", model: str = "fake", reasoning_effort: Effort = "none"
+    backend: Backend = "fake",
+    model: str = "fake",
+    reasoning_effort: Effort = "none",
+    temperature: float | None = None,
 ) -> AgentTarget:
     """The suites' entry point (`python: lite_agent.eval_target:agent`)."""
-    return AgentTarget(backend, model, reasoning_effort)
+    return AgentTarget(backend, model, reasoning_effort, temperature)
 
 
 __all__ = ["SYSTEM", "TASKS", "AgentTarget", "agent"]

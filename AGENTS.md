@@ -36,8 +36,9 @@ the system prompt, `load_skill`) and memory (`recall` / `remember`). **S3b done 
 history it covers, `SummaryCompactor`. S3 is complete. S4 in two parts: **S4a done 2026-11-21** — `PgSessionStore`
 (extra `pg`), migrations, the invariant check reading only the tail. **S4b done 2026-11-21** — resume and
 fork across processes, `copy_session`, the `liteagent` CLI. S4 is complete. S5 in two parts: **S5a done 2026-11-21** — a
-synthetic shop, twelve tasks judged in code, the lite-eval target (extra `eval`). Next: S5b (the Ollama
-baseline, projection and read timings).
+synthetic shop, twelve tasks judged in code, the lite-eval target (extra `eval`). **S5b done 2026-11-21** — the Ollama
+baseline (qwen3:8b 0.750, with thinking 0.889; qwen3:1.7b 0.417) and the timings. S5 is complete.
+Next: S5.5 (the v0.1.0 release wheel).
 
 ## Rules
 

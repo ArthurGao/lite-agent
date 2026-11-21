@@ -26,6 +26,7 @@ class Order:
     item: str
     amount: Decimal
     status: Status
+    next_order: str | None = None  # the order to look up after this one (the long task's chain)
 
 
 CUSTOMERS = (
@@ -33,6 +34,7 @@ CUSTOMERS = (
     Customer("C2", "Bo Chen", "bo@example.com"),
     Customer("C3", "王芳", "wang.fang@example.cn"),
     Customer("C4", "李雷", "li.lei@example.cn"),
+    Customer("C5", "Sam Ito", "sam@example.com"),
 )
 ORDERS = (
     Order("A17", "C1", "desk lamp", Decimal("42.00"), "shipped"),
@@ -46,6 +48,15 @@ ORDERS = (
     Order("D04", "C4", "笔记本", Decimal("18.00"), "delivered"),
     Order("E01", "C4", "钢笔", Decimal("56.00"), "delivered"),
     Order("E02", "C4", "墨水", Decimal("12.50"), "processing"),
+    # The long task's chain: each order names the next, so they can only be looked up in turn.
+    Order("F01", "C5", "notebook", Decimal("24.00"), "delivered", "F02"),
+    Order("F02", "C5", "backpack", Decimal("61.50"), "delivered", "F03"),
+    Order("F03", "C5", "headphones", Decimal("140.00"), "delivered", "F04"),
+    Order("F04", "C5", "pencils", Decimal("9.90"), "delivered", "F05"),
+    Order("F05", "C5", "desk mat", Decimal("33.00"), "shipped", "F06"),
+    Order("F06", "C5", "lamp shade", Decimal("77.25"), "delivered", "F07"),
+    Order("F07", "C5", "stapler", Decimal("15.00"), "processing", "F08"),
+    Order("F08", "C5", "folder set", Decimal("48.35"), "delivered"),
 )
 STOCK = {"LAMP-1": 3, "CHAIR-2": 0, "MAT-3": 12, "ARM-4": 5}
 
@@ -70,24 +81,24 @@ class ByEmail(BaseModel):
 
 
 class ByCustomer(BaseModel):
-    customer_id: str = Field(description="A customer id such as C1")
+    customer_id: str = Field(description="A customer id such as C9")
 
 
 class ByOrder(BaseModel):
-    order_id: str = Field(description="An order id such as A17")
+    order_id: str = Field(description="An order id such as Z01")
 
 
 class BySku(BaseModel):
-    sku: str = Field(description="A stock keeping unit such as LAMP-1")
+    sku: str = Field(description="A stock keeping unit such as SKU-0")
 
 
 class RefundArgs(BaseModel):
-    order_id: str = Field(description="An order id such as A17")
+    order_id: str = Field(description="An order id such as Z01")
     amount: Decimal = Field(gt=0, description="The amount to refund, in the shop's currency")
 
 
 class NoteArgs(BaseModel):
-    customer_id: str = Field(description="A customer id such as C1")
+    customer_id: str = Field(description="A customer id such as C9")
     text: str = Field(min_length=1, description="What the customer will read")
 
 
@@ -157,4 +168,5 @@ class World:
 
 
 def _row(o: Order) -> str:
-    return f"order {o.id}: {o.item}, {o.amount:.2f}, {o.status} (customer {o.customer_id})"
+    row = f"order {o.id}: {o.item}, {o.amount:.2f}, {o.status} (customer {o.customer_id})"
+    return f"{row}; next order to look up: {o.next_order}" if o.next_order else row
