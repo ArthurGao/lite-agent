@@ -79,18 +79,39 @@ class Agent:
     def tool(self, name: str) -> Tool | None:
         return next((t for t in self.all_tools if t.name == name), None)
 
-    async def run(self, task: str, *, session_id: str | None = None) -> RunResult:
-        """Run `task` to an outcome. With `session_id`, as the next run of that session."""
-        return await self.runner.run(self, session_id, task)
+    async def run(
+        self,
+        task: str,
+        *,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        new_session: bool = False,
+    ) -> RunResult:
+        """Run `task` to an outcome. With `session_id`, as the next run of that session; with
+        `new_session`, in a new session that takes that id. A `run_id` names the run: calling
+        again with it never starts a second run (a finished run is answered from the log, one
+        that was cut off goes on where it stopped; design §9)."""
+        return await self.runner.run(self, session_id, task, run_id=run_id, new_session=new_session)
 
-    async def resume(self, session_id: str, input: Resume | None = None) -> RunResult:
+    async def resume(
+        self, session_id: str, input: Resume | None = None, *, run_id: str | None = None
+    ) -> RunResult:
         """Go on with a session whose last run paused, failed or was interrupted: settle the
         calls its last turn left without a result, then continue (design §8). `input` carries
         the decisions and results the host brings; nothing is needed to retry a failed turn or
-        to recover calls that are safe to run again."""
-        return await self.runner.run(self, session_id, input or Resume())
+        to recover calls that are safe to run again. `run_id` as for `run()`."""
+        return await self.runner.run(self, session_id, input or Resume(), run_id=run_id)
 
-    def run_sync(self, task: str, *, session_id: str | None = None) -> RunResult:
+    def run_sync(
+        self,
+        task: str,
+        *,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        new_session: bool = False,
+    ) -> RunResult:
         """`run()` for a caller without an event loop. Inside a running loop `asyncio.run`
         raises RuntimeError: await `run()` there instead."""
-        return asyncio.run(self.run(task, session_id=session_id))
+        return asyncio.run(
+            self.run(task, session_id=session_id, run_id=run_id, new_session=new_session)
+        )

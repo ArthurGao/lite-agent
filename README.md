@@ -60,6 +60,27 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## Over HTTP
+
+For a host in another language (`lite-agent[server]`): name the agents in `agents.toml`, each a
+Python factory that builds an `Agent` on the shared store, and serve them on loopback.
+
+```
+# agents.toml
+[store]
+kind = "postgres"                     # or "memory"
+[agents.clock]
+factory = "myapp.agents:clock"        # def clock(sessions: SessionStore) -> Agent
+
+liteagent serve --agents agents.toml  # 127.0.0.1:8730; the schema is at /openapi.json
+curl -s -X POST localhost:8730/runs -H 'content-type: application/json' \
+     -d '{"agent": "clock", "task": "What time is it in Paris?"}'      # {"session_id", "run_id"}
+curl -sN localhost:8730/sessions/<session_id>/events/stream          # SSE until the run ends
+```
+
+A paused run goes on with `POST /sessions/<id>/resume` (`expected_seq`, `approve`, `results`);
+`POST /sessions/<id>/fork` branches a session. Design §10 has the protocol.
+
 The design, its decisions and the stage plan are in [`docs/lite-agent-design.md`](docs/lite-agent-design.md) (Chinese). License: Apache-2.0.
 
 ## Developing

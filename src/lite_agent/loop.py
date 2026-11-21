@@ -10,7 +10,7 @@ from lite_model import AssistantTurn, CallFailed, ModelError, ToolCall, Usage
 
 from lite_agent.budget import add_usage, spent
 from lite_agent.compaction import SUMMARY, Compactor, clean
-from lite_agent.errors import HarnessError, StoreError, UnknownSession, UnresolvedCalls
+from lite_agent.errors import HarnessError, SeqConflict, StoreError, UnknownSession, UnresolvedCalls
 from lite_agent.events import (
     Compaction,
     ErrorKind,
@@ -32,7 +32,9 @@ from lite_agent.events import (
     UserMessage,
     blocks_of,
     provenance_data,
+    turn_of,
     usage_data,
+    usage_of,
 )
 from lite_agent.gates import Allow, Deny, PauseFor, RunContext
 from lite_agent.projection import Projection, derive, history, last_turn, unanswered_calls
@@ -422,6 +424,42 @@ class _Run:
         )
         return None
 
+    async def again(self, started: RunStarted, given: Resume | None) -> RunResult:
+        """The run this one names is in the log already (a retry: design §9). Finished, it is
+        answered from the log and nothing is written; cut off, it goes on in the same run: the
+        calls its last turn left open are settled by the rules of §8 (a non-idempotent call that
+        was started is never run again), then the loop continues. `given` is the same input as
+        the first attempt's: it reaches only calls that still have no result."""
+        self.opened = started.seq
+        mine = [e for e in self.log if e.seq > started.seq and e.run_id == self.run_id]
+        finished = next((e for e in reversed(mine) if isinstance(e, RunFinished)), None)
+        if finished is not None:
+            return self.recorded(finished, mine)
+        for e in mine:  # what the first attempt spent belongs to this run's total
+            if isinstance(e, ModelTurn | Compaction | ModelErrorEvent) and e.usage is not None:
+                self.usage = add_usage(self.usage, usage_of(e.usage))
+        if unanswered_calls(self.log) and (ended := await self.settle_turn(given)) is not None:
+            return ended
+        return await self.loop()
+
+    def recorded(self, finished: RunFinished, mine: list[Event]) -> RunResult:
+        """A finished run's result, as its events tell it."""
+        last = next((e for e in reversed(mine) if isinstance(e, ModelTurn)), None)
+        text = turn_of(last.blocks, opaque=False).text if last is not None else ""  # as live
+        paused = next((e for e in reversed(mine) if isinstance(e, Paused)), None)
+        failed = next((e for e in reversed(mine) if isinstance(e, ModelErrorEvent)), None)
+        error = None
+        if finished.outcome == "failed" and finished.stop == "error" and failed is not None:
+            error = RunError("model", failed.error)
+        self.usage = usage_of(finished.usage)
+        return self.result(
+            finished.outcome,
+            finished.stop,
+            text=text or None,
+            error=error,
+            pause=Pause(paused.waiting) if finished.outcome == "paused" and paused else None,
+        )
+
     async def loop(self) -> RunResult:
         agent = self.agent
         while True:
@@ -502,6 +540,34 @@ class _Run:
             return await self.finish("failed", stop, text=text, after=said)
 
 
+class _Taken(SeqConflict):
+    """A new session asked for under an id another run already has."""
+
+
+def _named(log: list[Event], run_id: str, input: str | Resume) -> RunStarted | None:
+    """The run `run_id` names in this session, if it is there. A run id names one run: it may
+    only be the session's last run (a retry of the newest call) and only with the input it was
+    started with; anything else is a reused id and raises ValueError."""
+    started = [e for e in log if isinstance(e, RunStarted)]
+    named = next((e for e in started if e.run_id == run_id), None)
+    if named is None:
+        return None
+    if started[-1] is not named:
+        raise ValueError(f"run {run_id} is not the session's last run: a run id names one run")
+    if isinstance(input, str):
+        task = next(
+            (
+                e
+                for e in log
+                if isinstance(e, UserMessage) and e.run_id == run_id and e.origin == "task"
+            ),
+            None,
+        )
+        if task is not None and task.text != input:
+            raise ValueError(f"run {run_id} was started with another task")
+    return named
+
+
 def _check_resume(log: list[Event], given: Resume) -> None:
     """Raises ValueError, before anything is written, for a `Resume` that does not fit the
     session: a decision or a result for a call that is not waiting for one, or nothing to do."""
@@ -527,7 +593,14 @@ def _check_resume(log: list[Event], given: Resume) -> None:
             raise ValueError("nothing to resume: the session's last run is complete")
 
 
-async def run_loop(agent: "Agent", session_id: str | None, input: str | Resume) -> RunResult:
+async def run_loop(
+    agent: "Agent",
+    session_id: str | None,
+    input: str | Resume,
+    *,
+    run_id: str | None = None,
+    new_session: bool = False,
+) -> RunResult:
     """Run a task in a new session (`session_id=None`) or as the next run of an existing one, or
     resume a session (design §8). Raises UnknownSession; UnresolvedCalls for a task sent to a
     session whose last turn still has unanswered calls; ValueError for a `Resume` that does not
@@ -536,7 +609,9 @@ async def run_loop(agent: "Agent", session_id: str | None, input: str | Resume) 
     given = input if isinstance(input, Resume) else None
     if given is not None and session_id is None:
         raise ValueError("resume() needs a session")
-    run = _Run(agent, session_id or agent.ids(), agent.ids())
+    if new_session and (session_id is None or given is not None):
+        raise ValueError("new_session needs a session_id and a task")
+    run = _Run(agent, session_id or agent.ids(), run_id or agent.ids())
     tools = tuple(ToolDef.model_validate(t, from_attributes=True) for t in agent.all_tools)
     opening: list[Pending] = [
         partial(
@@ -548,11 +623,21 @@ async def run_loop(agent: "Agent", session_id: str | None, input: str | Resume) 
         )
     ]
     try:
-        if session_id is None:
-            opening.insert(0, SessionStarted)
-        else:
-            run.log = await run.read()
+        fresh = session_id is None
+        if not fresh:
+            try:
+                run.log = await run.read()
+            except UnknownSession:
+                if not new_session:
+                    raise
+                fresh = True
             run.checked = run.log[-1].seq if run.log else 0  # read whole: all of it is checked
+            if run_id is not None and (started := _named(run.log, run_id, input)) is not None:
+                return await run.again(started, given)
+            if new_session and not fresh:
+                raise _Taken(f"session {session_id} already exists")
+        if fresh:
+            opening.insert(0, SessionStarted)
         open_calls = unanswered_calls(run.log)
         if given is not None:
             _check_resume(run.log, given)
@@ -569,9 +654,12 @@ async def run_loop(agent: "Agent", session_id: str | None, input: str | Resume) 
         if open_calls and (ended := await run.settle_turn(given)) is not None:
             return ended
         return await run.loop()
-    except UnknownSession:
-        raise
+    except (UnknownSession, _Taken):
+        raise  # the caller's error, not the store's: nothing was written
     except StoreError as exc:
+        if new_session and run.opened == 0 and isinstance(exc.__cause__, SeqConflict):
+            # another caller created the session first: as for an id already taken
+            raise _Taken(f"session {session_id} already exists") from exc
         error = RunError("store", type(exc.__cause__ or exc).__name__)
     except HarnessError as exc:
         error = RunError("harness", type(exc).__name__)

@@ -105,9 +105,12 @@ class Agent:
     compaction: Compactor | None = None         # S3b: None = nothing is summarised
     compact_role: str = "compact"               # S3b: the lite-model role that writes summaries
 
-    async def run(self, task: str, *, session_id: str | None = None) -> RunResult: ...
-    async def resume(self, session_id: str, input: Resume | None = None) -> RunResult: ...   # S2b
-    def run_sync(self, task: str, *, session_id: str | None = None) -> RunResult: ...
+    async def run(self, task: str, *, session_id: str | None = None,
+                  run_id: str | None = None, new_session: bool = False) -> RunResult: ...  # S6: run_id, new_session
+    async def resume(self, session_id: str, input: Resume | None = None, *,
+                     run_id: str | None = None) -> RunResult: ...   # S2b; S6: run_id
+    def run_sync(self, task: str, *, session_id: str | None = None, run_id: str | None = None,
+                 new_session: bool = False) -> RunResult: ...
 
 @dataclass(frozen=True)
 class RunResult:
@@ -180,7 +183,8 @@ class Gate(Protocol):                           # S2b: asked before a tool call 
     # RunContext: session_id, run_id, events (the log so far)
 
 class Runner(Protocol):                         # where the loop's steps execute
-    async def run(self, agent: Agent, session_id: str | None, input: str | Resume) -> RunResult: ...
+    async def run(self, agent: Agent, session_id: str | None, input: str | Resume, *,
+                  run_id: str | None = None, new_session: bool = False) -> RunResult: ...
 ```
 
 - `run(task)` 开一个新 session；`run(task, session_id=…)` 是那个 session 的下一次 run（多轮对话），不存在的
@@ -188,6 +192,13 @@ class Runner(Protocol):                         # where the loop's steps execute
 - `resume(session_id, input)`（S2b）接着一个暂停、失败或被打断的 session 往下走（§8）。不带输入也可以调用：重试
   失败的那一轮，或恢复可以安全重跑的 call。输入对不上（不存在的 call id、给已开始的 call 批准、给没开始的 call
   结果、session 已经完整结束）抛 `ValueError`，不写任何事件。
+- **调用方给 run 命名**（S6，S7 的 activity 重试靠它）：`run_id` 给定时，再用同一个 id 调用永远不会开第二个 run——
+  log 里这个 run 已经结束，就从 log 还原结果返回、什么都不写；没结束（进程死在中途），就**在同一个 run 里接着跑**：
+  不再写开头的事件，上一轮留下的 call 按 §8 处理（开始过的非幂等 call 不重跑，要求核对），然后继续 loop。
+  `new_session=True` 用给定的 `session_id` 建一个新 session；这个 id 已被别的 run 用掉时抛 `SeqConflict`
+  （两个调用方同时抢同一个 id 也是：输的一方得到 `SeqConflict`，不是一个失败的 run）。
+  一个 `run_id` 只命名一个 run：它只能是这个 session 的**最后一个** run（重试的是最新的那次调用），而且任务要和第一次
+  相同；否则是复用了 id，抛 `ValueError`。重试时要传和第一次相同的输入：`resume` 的 `Resume` 只作用于还没有结果的 call。
 - `Tool` 用 JSON Schema 字典而不是 Pydantic 模型：loop 只需要把定义交给模型、把参数交给函数。两个实现：
   `@tool`（S2a）做出 `ModelTool`——schema 是模型的 `model_json_schema()`，`validate()` 用 Pydantic 校验，函数拿到的
   是模型实例；`FunctionTool` 包一个拿原始参数的 async 函数，不校验。
@@ -470,23 +481,39 @@ class Runner(Protocol):                         # where the loop's steps execute
 - **inbox / timer**（KB §12）：每个触发源写同一个 durable inbox，一个 inbox 一个 worker；timer 只负责入队。
   随 TemporalRunner 一起设计，届时在本文加一节。
 
-## 10. HTTP 壳（S6，按需）
+## 10. HTTP 壳（S6）
 
-`liteagent serve`（extra `server`，FastAPI，绑定 127.0.0.1，端口见 §16）。只有四类操作，全部转给 `Agent`：
+`liteagent serve --agents agents.toml [--host 127.0.0.1] [--port 8730]`（extra `server`：FastAPI 0.162.2、uvicorn
+0.54.0，与 lite-mem 相同）。代码里是 `lite_agent.server.create_app(registry)`。它不含自己的逻辑：检查请求，然后交给
+`Agent`（规则 10）。
 
-| 操作 | 说明 |
+**agent 登记**（`lite_agent.registry`，S7 的 worker 也用）：`agents.toml` 给每个名字指一个 Python 工厂
+`模块:函数`，工厂收到共享的 session store、返回一个 `Agent`；`[store] kind` 是 `postgres`（读 `LITEAGENT_DATABASE_URL`
+/ `LITEAGENT_SCHEMA`）或 `memory`。文件、导入、返回值、agent 不在共享 store 上，都在启动时报错（`RegistryError`）。
+请求只能按名字选 agent，不能带 tool 或代码：请求体 `extra="forbid"`，多一个字段就是 422。
+
+| 操作 | 行为 |
 | --- | --- |
-| `POST /runs` | 发起一次 run（agent 名字来自服务端配置，请求里不能带 tool 的代码） |
-| `GET /sessions/{id}/events` | 读 event log；SSE 跟随新事件（粒度是"一轮"） |
-| `POST /sessions/{id}/resume` | 提交审批结论或外部 tool 的结果 |
-| `POST /sessions/{id}/fork` | 从某个 seq 分叉 |
+| `POST /runs` `{agent, task, session_id?}` | 在后台起一个 run，立刻 `202 {session_id, run_id}`（服务端生成两者，用 §3 的 `run_id` / `new_session`）；给了 `session_id` 而它在等 resume → 409 |
+| `GET /sessions/{id}/events?after=N` | log，`events.dump()` 原样 |
+| `GET /sessions/{id}/events/stream?after=N` | SSE（FastAPI 的 `EventSourceResponse`），每条事件 `event: <type>`、`id: <seq>`、`data: <dump>`；run 结束后发完剩下的就关闭 |
+| `POST /sessions/{id}/resume` `{agent, expected_seq, approve?, results?}` | `expected_seq` 不是尾部 → 409；决定或结果给了一个不在等它的 call（包括已有结果的）→ 422，不覆盖；否则后台 resume，202 |
+| `POST /sessions/{id}/fork` `{at_seq}` | `{session_id}`；fork 点不存在 → 422 |
+| `GET /agents` | 名字、role、tool 的 schema |
 
-TypeScript 宿主提供 tool 的三种方式：MCP server（首选）、外部执行（§7）、Temporal activity（§9）。
-认证、多租户在做 S6 时设计；没有认证之前只绑定 loopback。
-
-做 S6 之前要先定的协议（现在只列要求）：agent 和它的 tool schema 在服务端配置里登记，请求不能新增 tool；
-暂停的外部 tool 用 `call_id` 对应，提交结果时带 `expected_seq`；已有结果的 `call_id` 再提交、或 seq 过期，
-一律拒绝（409），不覆盖。
+- **同一 session 同时只有一个 run**：请求一通过检查就"占住"这个 session（检查和占住之间没有 await，两个同时到的请求
+  不会都通过），run 结束才放开；第二个 → 409。这只是进程内的：跨进程时真正的保证是 store 的 `expected_seq`
+  检查。服务端开始的 session 在第一批事件写下之前也能读（空），不存在的 session 仍是 404。
+- **错误**：404 `UnknownSession` / 未知 agent，409 冲突，422 不合法；错误体不含上游原文（规则 14）。
+- **只绑定 loopback**：`--host` 必须是数字形式的回环地址（`127.0.0.1`、`::1`）；名字（包括 `localhost`）可能解析
+  到别处，一律拒绝。没有认证；要对外提供时再设计认证和多租户。
+- **网页够不着它**：绑在 loopback 上，网页仍然可以把自己的域名重新解析到 127.0.0.1（DNS rebinding），或者直接从浏览器
+  发请求。所以每个请求的 `Host` 必须是 loopback 名字（`127.0.0.1`、`::1`、`localhost`，带不带端口），否则 400；带了
+  `Origin` 的必须**正好是壳自己的**（`http://` 加同一个 `Host`；本机别的端口上的页面也算外来的），否则 403；每个 POST 必须是
+  `application/json`（表单或纯文本的 POST 不需要 CORS 预检，网页能盲发），否则 415。
+- **关闭**：shutdown 时等还在跑的 run 结束（`drain`），不在一轮中间切断。
+- TypeScript 宿主：FastAPI 生成的 `/openapi.json`；不做 TS 包。宿主提供 tool 的方式：MCP server（按需阶段）、外部执行
+  （§7，暂停 → `resume` 带结果）、Temporal activity（§9）。
 
 ## 11. 配置
 
@@ -953,6 +980,36 @@ docs/lite-agent-design.md
   - 发版：tag `v0.1.0`（`4fa94d5`），CI run 44876227588 的 test / package（tag 与 wheel 版本一致）/ release 全部成功，
     Release 带 wheel 和 sdist。发版后的验收：一个全新的项目从 Release 的 URL 安装（带上 lite-model 0.4.0），README
     的例子原样在本机 qwen3:8b 上跑出 `completed`，8 个事件与 README 一致。Release：`https://github.com/ArthurGao/lite-agent/releases/download/v0.1.0/lite_agent-0.1.0-py3-none-any.whl`。
+- **S6（2026-11-21）**：HTTP 壳（§10）、agent 登记 `lite_agent.registry`、§3 的 `run_id` / `new_session`。测试先写。
+  - 规则 → 测试：同一个 `run_id` 不开第二个 run——结束了从 log 还原、中途死掉在同一个 run 里接着跑、死在非幂等 tool
+    里要求核对、resume 调两次只执行一次（`tests/contract/test_run_id.py`，两种 store；关掉"log 里已有这个 run"的分支，
+    13 条里 8 条失败）。HTTP：发起 → SSE 跟到结束、过期的 `expected_seq` 得 409、不在等的 call 得 422、同一 session
+    第二个 run 得 409、fork、未知 agent / session 得 404、请求多带字段得 422、只绑 loopback、`agents.toml` 的各种错
+    （`tests/contract/test_server.py`，两种 store；分别关掉尾部检查、单 run 检查、loopback 检查，对应的测试失败）。
+  - 与 plan 的出入：SSE 是单独的路由 `/events/stream`，不按 `Accept` 切换（FastAPI 的 SSE 路由是生成器，不能同时返回
+    JSON）；服务端开始的 session 在第一批事件写下前就能被读（PG 上先读会 404，测试抓到的竞态）；`drain` 跟踪每个开始过
+    的 run，不只每个 session 的当前 run（关掉单 run 检查时，旧的写法让 PG 上的测试在关 store 时挂住）。
+  - 收尾 `/simplify`：采纳——从 log 还原的回答文本与现场的拼法一致（`turn_of(...).text`）；只有续跑的路径才累计 usage；
+    只在给了 `run_id` 时扫描 log；流的第一次读取直接用作第一批；`server.py` 用具体类型；`/agents` 用与 `run_started` 相同的
+    `ToolDef` 转换；去掉多余的 `started` 集合。记下不做：把 `_check_resume` 公开（加导出，壳之外没人用）；把"一个 session
+    一个 run"放进库里（跨进程的保证已经是 store 的 `expected_seq`）。
+  - 收尾 Codex（只读），采纳五条，都先写测试见红：复用的 `run_id`（不是最后一个 run、或任务不同）抛 `ValueError`，不再回放
+    旧结果；两个并发的 `new_session` 抢同一个 id，输的一方得到 `SeqConflict`；同一 session 两个同时到的 run / resume 请求
+    只有一个 202（检查和占住之间没有 await）；工厂抛错、数据库没配置都是 `RegistryError`；`localhost` 也被拒绝。另补一条
+    测试：resume 执行到一半死掉，重试只补没有结果的 call。否决一条："错误体可能含上游原文"——这些响应都是壳自己写的文字，
+    后台 run 的异常只进日志。
+  - 修复改了壳的大半，按规则再做一轮只针对修复的 Codex：一条，采纳——`create_task` 本身失败时占住的 session 没人放开
+    （`test_a_run_that_could_not_be_started_releases_its_session`，去掉释放时它失败）。
+  - 合并前的自动安全审查（采纳）：没有认证的 loopback 服务会被 DNS rebinding 或浏览器里的页面调用（包括批准一个暂停的
+    run）。加了 `Host` / `Origin` 检查（`test_a_request_from_a_web_page_is_refused`，不注册这个检查时 4 例失败）。顺带修了
+    一条依赖时序的测试：一个 session 一个 run 的测试原来假定第一个 run 还没跑完，现在第一个 run 的模型等测试放行才回复。
+  - 推送后的第二次安全审查（采纳）：`Origin` 只要是 loopback 就放行太宽，本机另一个开发服务器的页面也能调用；改成必须
+    正好是壳自己的 origin，POST 只收 JSON（`test_another_origin_on_this_machine_is_refused`、`test_a_post_that_is_not_json_is_refused`，
+    先红）。没做 bearer token：要对外或多用户使用时随认证一起设计。
+  - CI 第一次红：`agents.toml` 的几条测试没写 `[store]`，默认是 postgres，读环境变量和 `.env`——本机有 `.env` 就过了，CI 没有。
+    这几条测的是工厂，现在显式写 `kind = "memory"`；整个测试集也在没有 `.env` 的目录外跑过一遍（PG 测试按设计报错，其余通过）。
+  - 本机验收：`liteagent serve`（loopback 8730）用本机 qwen3:8b 跑一次，curl 发起、SSE 跟随到 `run_finished completed`，
+    `/openapi.json` 200；跑完关掉。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 
@@ -985,6 +1042,5 @@ docs/lite-agent-design.md
   中位数 0.22 / 1.13 / 5.96 ms；PG 尾部读取 0.47 / 0.50 / 0.74 ms，三层 fork 末端 1.6 / 2.0 / 4.6 ms；整读 2 / 9 / 59 ms
   （只在 run 开始时）。模型调用是秒级，**不缓存投影，读取也不改成一条递归 CTE**；session 到几万个事件时再测。
 - **memory 与 llm-steward**：agent 写 memory 是直接用 lite-mem，还是必须经过 llm-steward 的治理。
-- **HTTP 端口**：提议 8730（8700 lite-rag、8710 lite-mem、8720–8722 lite-eval）；S6 时在 KB
-  `global/machine/ports.md` 登记后才算数。
+- ~~**HTTP 端口**~~：8730（S6 定，KB `global/machine/ports.md` 登记）。
 - **项目 KB 的位置**：提议 `KB/projects/lite-agent/`（S0 创建）；lite-cache 是放在仓库内 `kb/`。

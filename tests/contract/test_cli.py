@@ -4,6 +4,7 @@ asserted line by line. The CLI only parses input and calls the library (AGENTS.m
 import asyncio
 import json
 import secrets
+from typing import Any
 
 import psycopg
 import pytest
@@ -195,3 +196,19 @@ def test_ids_and_errors_are_escaped_too(env: str, pg_schema: str) -> None:
         assert "\x1b" not in out and "\x07" not in out and "\x9b" not in out
     assert listed.output.splitlines()[1].startswith("s\\x1b]0;owned\\x07\\x9b2J")
     assert missing.stderr == "error: no session nowhere\\x1b[2J\n"
+
+
+def test_serve_refuses_a_non_loopback_host_and_a_bad_agents_file(tmp_path: Any) -> None:
+    good = tmp_path / "agents.toml"
+    good.write_text(
+        '[store]\nkind = "memory"\n[agents.clock]\nfactory = "tests.contract.server_agents:clock"\n'
+    )
+    bad = tmp_path / "bad.toml"
+    bad.write_text('[agents.a]\nfactory = "tests.contract.nowhere:clock"\n')
+    public = runner.invoke(app, ["serve", "--agents", str(good), "--host", "0.0.0.0"])
+    broken = runner.invoke(app, ["serve", "--agents", str(bad)])
+    assert public.exit_code == 1 and "loopback only" in public.stderr
+    assert (
+        broken.exit_code == 1
+        and broken.stderr == "error: agent 'a': cannot import tests.contract.nowhere:clock\n"
+    )

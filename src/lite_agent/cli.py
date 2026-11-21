@@ -6,6 +6,7 @@ completion condition, which are Python objects a command line cannot give."""
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Annotated
 
@@ -163,6 +164,28 @@ def config() -> None:
     shown = _pg().redact_conninfo(url) if url else "(not set)"
     typer.echo(f"database_url  {_safe(shown)}")
     typer.echo(f"schema        {settings.schema_name}")
+
+
+@app.command()
+def serve(
+    agents: Annotated[Path, typer.Option(help="agents.toml: the agents this server offers")],
+    host: Annotated[str, typer.Option(help="loopback only (no authentication yet)")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(min=1, max=65535)] = 8730,
+) -> None:
+    """The HTTP shell (design §10; the server extra): runs, events, resume and fork over HTTP."""
+    try:
+        from lite_agent.registry import RegistryError, load_agents
+        from lite_agent.server import check_host, create_app
+    except ImportError as exc:  # FastAPI is the `server` extra
+        raise _fail("serve needs the server extra: install lite-agent[server]") from exc
+    try:
+        check_host(host)
+        registry = load_agents(agents)
+    except (ValueError, RegistryError) as exc:
+        raise _fail(str(exc)) from None
+    import uvicorn
+
+    uvicorn.run(create_app(registry), host=host, port=port)
 
 
 def main() -> None:
