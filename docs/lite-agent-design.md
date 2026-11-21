@@ -500,7 +500,34 @@ tool 执行各一个 activity"（这一节原来的方向）。理由：
 - 宿主：`TemporalRunner(client, task_queue)`：`start(agent, task, routes=…)` → workflow id、`decide(...)`、`status(...)`、`result(...)`。
   它没有实现 `Runner` 协议：一个 `Agent` 对象不能跨进程传过去，worker 里的 agent 按名字登记。
 
-- **inbox / timer**（KB §12）：S7b，见 §9.1（随 S7b 写）。
+### 9.1 inbox 与 timer（S7b；KB `llm-app-architecture` §12.1–12.2）
+
+常驻 agent：webhook、定时、人的回复都**只写进一个持久的 inbox**，从不直接调用 agent；一个 inbox 一个 worker。
+
+- **表**（PostgreSQL 迁移 `0002_inbox.sql`，与 session 同一个 schema）：
+  - `inbox_events`：每个事件一行，按 `(inbox, source, source_id)` 去重（来源投递两次只记一次）。kind 是 `message`
+    （文本；带 `session_id` 就接着那个 session）或 `decision`（审批结论 / 外部结果，必须带 `session_id`）。状态 pending →
+    done / refused，记下这次 run 用的 session。
+  - `timers`：`follow_up`（agent 自己定的期限，触发一次）和 `schedule`（每 `every_s` 秒）。它们不是工作：到期时
+    `fire_due(now)` 在同一个事务里写入 inbox 事件并推进 timer；一次触发的来源 id 是"timer id @ 到期时间"，所以只写一次；
+    停机错过的多个周期只补触发一次，下一次是 now 之后的第一个时刻。
+- **`PgInbox`**（`lite_agent.pg.inbox`）建在 `PgSessionStore` 上：`put`、`pending`、`finish`、`add_follow_up`、`add_schedule`、`fire_due`。
+- **`InboxWorkflow`**（每个 inbox 一个，workflow id `inbox:<名字>`，由 Temporal 保证只有一个 worker）：取出待处理事件，
+  按到达顺序处理——同一 session 的连续消息合成一次 run（几条快速消息得到一个回复），decision 走 resume；每个工作项用
+  §9 的 run activity（`run_id` 来自 `workflow.uuid4()`，崩溃后的重试不重复），然后标记完成。需要审批的 run 暂停后就结束；
+  结论作为 decision 事件进来再接着跑（KB §12.4）。agent 接不了的事件（session 并不在等 decision、或在等 resume 时又来了一条消息）
+  标记 refused，不无限重试；**其余失败**（模型或数据库不在的时间比一项的重试还长）不丢工作：这一项留在 pending，worker 等一段
+  （30 秒起，每次翻倍，最多一小时）后**原样**重试它——同样的事件、同样的 session id 和 run id，做了一半的 run 接着跑。没有事件
+  就等 signal `wake`，最多等 `idle_check_s`（五分钟）也会自己看一眼；批次够多或 Temporal 建议时 Continue-As-New（工作在 inbox
+  里，不在 history 里；待重试的一项带过去）。
+- **`TimerWorkflow`**（全局一个，id `lite-agent-timers`）：每 `interval_s` 醒一次，用 workflow 的时间调 `fire_due`，对写到的
+  inbox、以及有事件 pending 超过 `stalled_s`（一分钟）的 inbox 做 signal-with-start——写了行却没来得及唤醒就死掉的处理函数，
+  它的事件由这里找回（每个事件都记着它的 agent）。它从不起 run。时间来自 workflow（`workflow.now()`），time-skipping 测试服务器可以快进它。
+- **入口**：webhook 处理函数只调 `enqueue(client, inbox, task_queue, agent=…, name=…, source=…, source_id=…, text=… | approve=…)`：
+  先写行，再 signal-with-start。`start_timers(client, task_queue)` 启动调度器（再启动一次就找到已在跑的那个）。
+  `liteagent worker --agents … --inbox --timers`。
+- 依赖：`lite_agent.temporal` 不带 `pg` extra 也能导入；用 inbox 时才需要 psycopg。
+
 
 ## 10. HTTP 壳（S6）
 
@@ -1048,6 +1075,28 @@ docs/lite-agent-design.md
     `liteagent worker` 缺 extra 时给安装提示。另补测试：宿主 tool 永久失败 → 模型拿到只带类型名的错误结果，run 继续
     （把异常原样抛出时它失败）。修复之后第二轮只针对 workflow 的 Codex：分两次 signal 回答同一个暂停时，resume 期间到的第二个回答
     会被清掉——改成只为仍在等的同一批 call 保留（`still_relevant`，单元测试 `tests/unit/test_temporal_decisions.py` 先红）。
+- **S7b（2026-11-21）**：inbox 与 timer（§9.1）。测试先写的是 `PgInbox`（`tests/contract/test_inbox.py`：去重、顺序、完成、
+  decision 必须带 session、follow-up 只触发一次、schedule 每个周期触发且停机只补一次）；Temporal 上（PostgreSQL + time-skipping，
+  `tests/temporal/test_inbox.py`）：重复投递只处理一次、两条快速消息合成一次 run、回复接着原 session、审批暂停后 decision 事件
+  让它完成、接不了的 decision 标记 refused 而 worker 继续、follow-up 和 schedule 到期入队并被处理（时间快进两小时）、
+  run activity 崩溃后重试只有一个 run。这些第一次跑就通过，所以都用变异看过红：去掉合并、把 refused 改成抛出、不关闭到期的
+  follow-up（这一条 Temporal 测试抓不到——同一次触发的来源 id 去重兜住了——由 `PgInbox` 的测试抓住），对应的测试失败。
+  - 收尾 `/simplify`：采纳——`PgSessionStore._connection()` 一处打开连接池，store 和 inbox 共用（原来各写一遍）；周期的算术用
+    timedelta 整除（没有浮点）；activity 里的导入移到模块顶部。记下不做：inbox 到 agent 的映射集中到一处（加接口）、`WorkItem.kind`
+    用 `Literal`。
+  - 收尾 Codex（只读），两条都采纳，都先写测试见红：一项的重试用完就标 refused，模型或数据库宕机久一点工作就永远丢了
+    （`test_an_outage_longer_than_the_retries_leaves_the_work_pending_not_refused`，把它改回 refused 时失败）；写了行、还没唤醒就
+    死掉的处理函数留下没人处理的事件（`test_an_event_nobody_woke_for_is_found_by_the_scheduler`，去掉找回时失败）。
+    simplify 的 D3 与第一条是同一个问题。
+    修复之后第二轮只针对修复的 Codex，两条都否决：
+    - "重试期间新事件会被并进同一批、旧 run_id 失效"：带着待重试的一项时 workflow 不调 `TAKE`，只重试那一项，成功之后才取新的；
+      一个 inbox 只有一个 worker，期间没有别的 run 进这个 session。
+    - "重试后才出现的永久错误被当成短暂的"：Temporal 最终给出的 `ActivityError` 不论第几次尝试都是同一个形状（cause 是 activity
+      抛出的 `ApplicationError`，`type` 是错误类名）；`test_an_event_the_agent_cannot_take_is_refused_and_the_worker_goes_on` 证明分类成立。
+  - 测试里的一个坑：同一个 time-skipping 服务器上，前面测试留下的 inbox workflow 有空闲计时器、却没有 worker 了——时间就跳
+    不过去；每个测试结束时终止它开的 inbox workflow。
+  - `test_migrate_applies_then_says_up_to_date` 的期望输出改成两个迁移（`0001_initial, 0002_inbox`）：这是新迁移带来的、
+    预期中的行为变化，不是为了让测试通过而改测试。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 

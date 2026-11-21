@@ -3,13 +3,14 @@
 that read their parent's prefix, nothing ever rewritten (the database refuses it)."""
 
 import asyncio
+import contextlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from psycopg import AsyncCursor, sql
+from psycopg import AsyncConnection, AsyncCursor, sql
 from psycopg_pool import AsyncConnectionPool
 from pydantic import TypeAdapter
 
@@ -128,6 +129,14 @@ class PgSessionStore:
             raise StoreError(f"{MIGRATE} (schema {self.schema})")
         self._opened = True
 
+    @contextlib.asynccontextmanager
+    async def _connection(self) -> AsyncIterator[AsyncConnection[Any]]:
+        """A pooled connection, the pool opened (and checked) on first use. The inbox, which
+        lives in this store's schema, uses it too."""
+        await self._open()
+        async with self._pool.connection() as conn:
+            yield conn
+
     async def close(self) -> None:
         self._closed = True
         await self._pool.close()
@@ -146,8 +155,7 @@ class PgSessionStore:
         return parent, fork_seq, own_max if own_max is not None else (fork_seq or 0)
 
     async def append(self, session_id: str, events: Sequence[Event], *, expected_seq: int) -> None:
-        await self._open()
-        async with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+        async with self._connection() as conn, conn.transaction(), conn.cursor() as cur:
             if events and expected_seq == 0:  # a session is created by its first batch only
                 await cur.execute(self._create, (session_id,))
             # one writer per session at a time: the second waits here, then sees the new tail
@@ -165,8 +173,7 @@ class PgSessionStore:
     async def read(
         self, session_id: str, *, after_seq: int = 0, upto_seq: int | None = None
     ) -> Sequence[Event]:
-        await self._open()
-        async with self._pool.connection() as conn, conn.cursor() as cur:
+        async with self._connection() as conn, conn.cursor() as cur:
             # the session and its ancestors, nearest first, each with the last seq it gives
             chain: list[tuple[str, int | None]] = []
             sid: str | None = session_id
@@ -189,8 +196,7 @@ class PgSessionStore:
         return [load(data) for (data,) in rows]  # EventRejected for what this code cannot read
 
     async def fork(self, session_id: str, *, at_seq: int) -> str:
-        await self._open()
-        async with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+        async with self._connection() as conn, conn.transaction(), conn.cursor() as cur:
             head = await self._head_of(cur, session_id)
             if head is None:
                 raise UnknownSession(f"no session {session_id}")
@@ -209,7 +215,6 @@ class PgSessionStore:
         own finished."""
         if limit < 1:
             raise ValueError(f"limit must be at least 1, not {limit}")
-        await self._open()
-        async with self._pool.connection() as conn, conn.cursor() as cur:
+        async with self._connection() as conn, conn.cursor() as cur:
             await cur.execute(self._list, (limit,))
             return [SessionInfo(*row) for row in await cur.fetchall()]
