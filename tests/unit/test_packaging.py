@@ -43,5 +43,5 @@ def test_the_wheel_carries_the_license_the_types_and_its_own_lite_model(wheel: P
     ]
     assert requires == [
         "Requires-Dist: lite-model @ https://github.com/ArthurGao/lite-model/releases/download/"
-        "v0.4.0/lite_model-0.4.0-py3-none-any.whl"
+        "v0.5.1/lite_model-0.5.1-py3-none-any.whl"
     ]
