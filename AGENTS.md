@@ -34,8 +34,8 @@ a completion condition with automatic continuation, cut-off text asked to go on,
 complete. S3 is done in two parts: **S3a done 2026-11-21** — skills (an index in
 the system prompt, `load_skill`) and memory (`recall` / `remember`). **S3b done 2026-11-21** — compaction: a summary event that masks the
 history it covers, `SummaryCompactor`. S3 is complete. S4 in two parts: **S4a done 2026-11-21** — `PgSessionStore`
-(extra `pg`), migrations, the invariant check reading only the tail. Next: S4b (resume and fork across
-processes, `copy_session`, the `liteagent` CLI).
+(extra `pg`), migrations, the invariant check reading only the tail. **S4b done 2026-11-21** — resume and
+fork across processes, `copy_session`, the `liteagent` CLI. S4 is complete. Next: S5 (evals).
 
 ## Rules
 
@@ -97,7 +97,7 @@ Python 3.12, uv, pydantic / pydantic-settings, Typer, lite-model (every model ca
 uv run --env-file .env pytest    # everything; PostgreSQL tests need LITEAGENT_TEST_DATABASE_URL
 uv run pytest -m ollama          # opt-in: real local Ollama
 uv run ruff check && uv run ruff format --check && uv run mypy
-uv run liteagent run | sessions | show | resume | fork | config    # from S4
+uv run liteagent migrate | sessions | show <id> [--json] | fork <id> --at <seq> | config   # needs `pg`
 ```
 
 ## Workflow

@@ -14,7 +14,11 @@ dependencies = [
     "lite-model @ https://github.com/ArthurGao/lite-model/releases/download/v0.4.0/lite_model-0.4.0-py3-none-any.whl",
     "pydantic==2.14.3",
     "pydantic-settings==2.16.2",
+    "typer==0.27.3",  # the CLI; the same as lite-cache and lite-mem
 ]
+
+[project.scripts]
+liteagent = "lite_agent.cli:main"
 
 [project.optional-dependencies]
 # The PostgreSQL session store (design §15 S4); the same psycopg as lite-cache and lite-mem.

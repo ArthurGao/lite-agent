@@ -19,7 +19,15 @@ from lite_model import (
 )
 from lite_model.testing import AsyncFakeModel
 
-from lite_agent import Agent, FunctionTool, InMemorySessionStore, Tool, ToolContext
+from lite_agent import (
+    Agent,
+    FunctionTool,
+    InMemorySessionStore,
+    PauseFor,
+    RunContext,
+    Tool,
+    ToolContext,
+)
 from lite_agent.events import Event, ToolResultEvent
 
 T0 = datetime(2026, 11, 21, 12, 0, tzinfo=UTC)
@@ -142,3 +150,23 @@ class FailingOnce(InMemorySessionStore):
             self.fail_at = None
             raise OSError("disk full")
         await super().append(session_id, events, expected_seq=expected_seq)
+
+
+class Ask:
+    """A gate that stops every call for a person's approval."""
+
+    name = "ask"
+
+    async def check(self, c: object, ctx: RunContext) -> PauseFor:
+        return PauseFor("a person decides")
+
+
+async def pg_read(url: str, schema: str, session_id: str) -> list[Event]:
+    """A session's events through a store object of its own, closed afterwards."""
+    from lite_agent.pg import PgSessionStore
+
+    store = PgSessionStore(url, schema=schema)
+    try:
+        return list(await store.read(session_id))
+    finally:
+        await store.close()

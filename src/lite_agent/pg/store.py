@@ -5,20 +5,35 @@ that read their parent's prefix, nothing ever rewritten (the database refuses it
 import asyncio
 import json
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from psycopg import AsyncCursor, sql
 from psycopg_pool import AsyncConnectionPool
 from pydantic import TypeAdapter
 
-from lite_agent.config import OwnSchema
+from lite_agent.config import NO_DATABASE, OwnSchema, Settings
 from lite_agent.errors import EventRejected, SeqConflict, StoreError, UnknownSession
 from lite_agent.events import Event, dump, load
 from lite_agent.pg.db import connection_error
 from lite_agent.store import check_batch, new_id
 
+
+@dataclass(frozen=True)
+class SessionInfo:
+    """One row of `PgSessionStore.sessions()`: what `liteagent sessions` shows."""
+
+    id: str
+    created_at: datetime
+    tail: int  # the last seq, inherited events included
+    last_outcome: str | None  # of the session's last finished run; None before one finished
+    parent_id: str | None
+    fork_seq: int | None
+
+
 _SCHEMA: TypeAdapter[str] = TypeAdapter(OwnSchema)
-MIGRATE = "the schema has no lite-agent tables: apply the migrations first (lite_agent.pg.migrate)"
+MIGRATE = "the schema has no lite-agent tables: apply the migrations first (`liteagent migrate`)"
 
 
 class PgSessionStore:
@@ -65,10 +80,27 @@ class PgSessionStore:
             "SELECT data FROM {} WHERE session_id = %s AND seq > %s"
             " AND (%s::int IS NULL OR seq <= %s::int) ORDER BY seq"
         ).format(events)
+        self._list = sql.SQL(
+            # per-row subqueries on the (session_id, seq) key, after the LIMIT: never the whole log
+            "SELECT s.id, s.created_at,"
+            " coalesce((SELECT max(seq) FROM {} e WHERE e.session_id = s.id), s.fork_seq, 0),"
+            " (SELECT f.data->>'outcome' FROM {} f WHERE f.session_id = s.id"
+            "  AND f.type = 'run_finished' ORDER BY f.seq DESC LIMIT 1),"
+            " s.parent_id, s.fork_seq"
+            " FROM {} s ORDER BY s.created_at DESC, s.id LIMIT %s"
+        ).format(events, events, sessions)
         self._fork = sql.SQL(
             "INSERT INTO {} (id, parent_id, fork_seq) VALUES (%s, %s, %s)"
             " ON CONFLICT (id) DO NOTHING"
         ).format(sessions)
+
+    @classmethod
+    def from_settings(cls, settings: Settings | None = None, **fields: Any) -> "PgSessionStore":
+        """A store from LITEAGENT_DATABASE_URL and LITEAGENT_SCHEMA (or `.env`)."""
+        settings = settings or Settings()
+        if not settings.database_url:
+            raise StoreError(NO_DATABASE)
+        return cls(settings.database_url, schema=settings.schema_name, **fields)
 
     async def _open(self) -> None:
         if self._opened and not self._closed:
@@ -169,3 +201,15 @@ class PgSessionStore:
             if cur.rowcount != 1:
                 raise EventRejected(f"session {child} already exists")
             return child
+
+    # --- beyond the contract: for the CLI and operators ---
+
+    async def sessions(self, limit: int = 50) -> list[SessionInfo]:
+        """The newest sessions first. A fork's last outcome is its own: None until a run of its
+        own finished."""
+        if limit < 1:
+            raise ValueError(f"limit must be at least 1, not {limit}")
+        await self._open()
+        async with self._pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(self._list, (limit,))
+            return [SessionInfo(*row) for row in await cur.fetchall()]

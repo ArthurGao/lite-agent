@@ -16,6 +16,8 @@ def own_schema(name: str) -> str:
     return name
 
 
+NO_DATABASE = "no database configured: set LITEAGENT_DATABASE_URL"
+
 # A schema lite-agent owns: a lowercase SQL identifier, not public or a system schema.
 OwnSchema = Annotated[
     str,

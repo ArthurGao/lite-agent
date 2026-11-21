@@ -212,6 +212,7 @@ dependencies = [
     { name = "lite-model" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "typer" },
 ]
 
 [package.optional-dependencies]
@@ -234,6 +235,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary", "pool"], marker = "extra == 'pg'", specifier = "==3.3.8" },
     { name = "pydantic", specifier = "==2.14.3" },
     { name = "pydantic-settings", specifier = "==2.16.2" },
+    { name = "typer", specifier = "==0.27.3" },
 ]
 provides-extras = ["pg"]
 

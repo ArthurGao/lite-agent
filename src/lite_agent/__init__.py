@@ -17,7 +17,7 @@ from lite_agent.gates import Allow, Deny, Gate, PauseFor, RunContext
 from lite_agent.projection import Projection, derive
 from lite_agent.result import Pause, Resume, RunError, RunResult, ToolOutcome, Waiting
 from lite_agent.runner import InProcessRunner, Runner
-from lite_agent.store import InMemorySessionStore, SessionStore
+from lite_agent.store import InMemorySessionStore, SessionStore, copy_session
 from lite_agent.tools import FunctionTool, ModelTool, Tool, ToolContext, tool
 
 __all__ = [
@@ -57,6 +57,7 @@ __all__ = [
     "UnknownSession",
     "UnresolvedCalls",
     "Waiting",
+    "copy_session",
     "derive",
     "tool",
 ]

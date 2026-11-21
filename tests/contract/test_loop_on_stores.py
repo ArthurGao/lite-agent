@@ -8,25 +8,16 @@ from lite_model.testing import AsyncFakeModel
 
 from lite_agent import (
     Budget,
-    PauseFor,
     Resume,
-    RunContext,
     RunError,
     SessionStore,
     SummaryCompactor,
     derive,
 )
 from lite_agent.events import Event, ToolResultEvent
-from tests.helpers import Recording, agent, call, kinds, say
+from tests.helpers import Ask, Recording, agent, call, counter, kinds, say
 
 Make = Callable[..., SessionStore]
-
-
-class Ask:
-    name = "ask"
-
-    async def check(self, c: object, ctx: RunContext) -> PauseFor:
-        return PauseFor("a person decides")
 
 
 async def test_a_run_with_tools_a_pause_a_resume_and_a_compaction(make_store: Make) -> None:
@@ -105,3 +96,40 @@ async def test_the_budget_holds_across_runs_on_either_store(make_store: Make) ->
     await a.run("Two?", session_id=first.session_id)
     third = await a.run("Three?", session_id=first.session_id)
     assert third.stop == "budget_turns" and len(model.turn_calls) == 2
+
+
+async def test_a_fork_of_a_fork_compacts_across_both_fork_points(make_store: Make) -> None:
+    # S4 acceptance (design §15): three sessions, one compaction in the youngest that covers
+    # events of all three; each session's projection is what it was, or what the summary makes it
+    store = make_store()
+    plain = agent(
+        AsyncFakeModel(agent=[say("One."), say("Two."), say("Three."), say("Four.")]),
+        sessions=store,
+        ids=counter("p"),
+    )
+    root = (await plain.run("First?")).session_id
+    await plain.run("Second?", session_id=root)  # seqs 6-9
+    child = await store.fork(root, at_seq=9)
+    await plain.run("Third?", session_id=child)  # 10-13
+    grandchild = await store.fork(child, at_seq=13)
+    await plain.run("Fourth?", session_id=grandchild)  # 14-17
+    before = {s: derive(await store.read(s)) for s in (root, child)}
+
+    compacting = agent(
+        AsyncFakeModel(agent=[say("Five.")], compact=[say("Earlier: four questions.")]),
+        sessions=store,
+        ids=counter("c"),
+        compaction=SummaryCompactor(context_tokens={"agent": 1}, keep_turns=1),
+    )
+    await compacting.run("Fifth?", session_id=grandchild)
+
+    events = list(await store.read(grandchild))
+    (done,) = [e for e in events if e.type == "compaction"]
+    assert done.session_id == grandchild
+    # from the root's first question to the grandchild's own first turn: past both fork points
+    assert done.covers == (3, 15)
+    assert {s: derive(await store.read(s)) for s in (root, child)} == before
+    first_message = derive(events).messages[0]
+    assert isinstance(first_message, Message)
+    assert first_message.content.endswith("Earlier: four questions.")
+    assert derive(events).messages[-1] == say("Five.")
