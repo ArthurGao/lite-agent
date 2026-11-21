@@ -286,3 +286,57 @@ async def test_an_event_nobody_woke_for_is_found_by_the_scheduler(
         rows = await settled(env, box, name)
         await env.client.get_workflow_handle("lite-agent-timers").terminate()
     assert [(r[0], r[1]) for r in rows] == [("m1", "done")]
+
+
+class Broken(AgentActivities):
+    """A run that fails every time on one message (a bug, or content that breaks it)."""
+
+    @activity.defn(name=RUN)
+    async def run(self, given: RunInput) -> Step:
+        if given.task and "poison" in given.task:
+            raise RuntimeError("this message breaks the run")
+        return await super().run(given)
+
+
+async def test_a_message_that_always_fails_is_set_aside_and_the_inbox_goes_on(
+    env: WorkflowEnvironment, box: Box
+) -> None:
+    # security review 2026-11-21: retrying for ever would hold up every event behind it
+    from lite_agent.temporal import INBOX_WORKFLOW
+    from lite_agent.temporal.types import InboxInput
+
+    q, name = queue(), f"ana-{uuid.uuid4().hex[:6]}"
+    box.names.add(name)
+    await box.inbox.put(name, "chat", "m1", text="poison", agent="echo")
+    acts = InboxActivities(box.inbox, env.client)
+    async with Worker(
+        env.client,
+        task_queue=q,
+        workflows=[AgentWorkflow, InboxWorkflow, TimerWorkflow],
+        activities=[Broken(box.registry).run, acts.take, acts.finish, acts.fire],
+        workflow_runner=SANDBOX,
+    ):
+        await env.client.start_workflow(
+            INBOX_WORKFLOW,
+            InboxInput(agent="echo", inbox=name, max_retry_s=600),
+            id=inbox_workflow_id(name),
+            task_queue=q,
+            start_signal="wake",
+        )
+        for _ in range(60):  # retried with a growing pause, then set aside
+            if not await box.inbox.pending(name):
+                break
+            await env.sleep(60)
+        # sent once m1 is set aside (sent earlier, it would have been batched with it)
+        await enqueue(
+            env.client,
+            box.inbox,
+            q,
+            agent="echo",
+            name=name,
+            source="chat",
+            source_id="m2",
+            text="Hello.",
+        )
+        rows = await settled(env, box, name)
+    assert [(r[0], r[1]) for r in rows] == [("m1", "failed"), ("m2", "done")]

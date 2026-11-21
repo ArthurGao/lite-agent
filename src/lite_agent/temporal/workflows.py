@@ -9,7 +9,7 @@ received) into the next workflow run; the next run goes on from the log.
 """
 
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from functools import partial
 
 from temporalio import workflow
@@ -180,6 +180,11 @@ class InboxWorkflow:
         while True:
             if retry is not None:
                 if not await self._handle(given, retry):
+                    first = datetime.fromisoformat(retry.since)
+                    if (workflow.now() - first).total_seconds() >= given.max_retry_s:
+                        await self._finish(retry, "failed")  # set aside for a person
+                        retry = None
+                        continue
                     await workflow.sleep(retry.backoff_s)
                     retry = replace(retry, backoff_s=min(retry.backoff_s * 2, given.max_backoff_s))
                     if workflow.info().is_continue_as_new_suggested():
@@ -209,7 +214,8 @@ class InboxWorkflow:
                     backoff_s=given.backoff_s,
                 )
                 if not await self._handle(given, attempt):
-                    retry = attempt  # the rest of the batch stays pending: taken again after it
+                    # the rest of the batch stays pending: taken again after it
+                    retry = replace(attempt, since=workflow.now().isoformat())
                     break
             batches += 1
 
@@ -243,12 +249,15 @@ class InboxWorkflow:
             if not (isinstance(cause, ApplicationError) and cause.type in PERMANENT):
                 return False  # retries spent on something that may pass: keep the work
             status = "refused"  # the agent cannot take it: retrying cannot help
+        await self._finish(attempt, status)
+        return True
+
+    async def _finish(self, attempt: Retry, status: str) -> None:
         await workflow.execute_activity(
             FINISH,
-            args=[item.ids, status, attempt.session_id],
+            args=[attempt.item.ids, status, attempt.session_id],
             start_to_close_timeout=timedelta(minutes=1),
         )
-        return True
 
 
 @workflow.defn(name=TIMER_WORKFLOW)
