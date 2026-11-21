@@ -1,0 +1,14 @@
+# S5b baseline (lite-agent design §15): the task set on local Ollama models, thinking off, three
+# runs per task. Free, but slow: check nothing else is evaluating on Ollama first
+# (`pgrep -fl lite-eval`), one run at a time.
+#   uv run lite-eval run eval/lite-eval/suites/agent-ollama.yaml
+name: agent-ollama
+dataset: ../datasets/agent
+repeats: 3
+targets:
+  - python: lite_agent.eval_target:agent
+    configs:
+      - {name: qwen3-8b, backend: ollama, model: "qwen3:8b", reasoning_effort: none}
+      - {name: qwen3-1.7b, backend: ollama, model: "qwen3:1.7b", reasoning_effort: none}
+scorers:
+  - exact_match: {field: done, expected: done}

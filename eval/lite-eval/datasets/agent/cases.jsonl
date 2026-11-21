@@ -1,0 +1,12 @@
+{"id": "lookup-en", "input": {"task": "lookup-en"}, "expected": {"done": true}, "tags": {"lang": "en", "kind": "lookup"}}
+{"id": "lookup-zh", "input": {"task": "lookup-zh"}, "expected": {"done": true}, "tags": {"lang": "zh", "kind": "lookup"}}
+{"id": "chain-en", "input": {"task": "chain-en"}, "expected": {"done": true}, "tags": {"lang": "en", "kind": "chain"}}
+{"id": "chain-zh", "input": {"task": "chain-zh"}, "expected": {"done": true}, "tags": {"lang": "zh", "kind": "chain"}}
+{"id": "act-en", "input": {"task": "act-en"}, "expected": {"done": true}, "tags": {"lang": "en", "kind": "act"}}
+{"id": "act-zh", "input": {"task": "act-zh"}, "expected": {"done": true}, "tags": {"lang": "zh", "kind": "act"}}
+{"id": "recover-en", "input": {"task": "recover-en"}, "expected": {"done": true}, "tags": {"lang": "en", "kind": "recover"}}
+{"id": "no-tool-en", "input": {"task": "no-tool-en"}, "expected": {"done": true}, "tags": {"lang": "en", "kind": "no_tool"}}
+{"id": "no-tool-zh", "input": {"task": "no-tool-zh"}, "expected": {"done": true}, "tags": {"lang": "zh", "kind": "no_tool"}}
+{"id": "skill-zh", "input": {"task": "skill-zh"}, "expected": {"done": true}, "tags": {"lang": "zh", "kind": "skill"}}
+{"id": "long-en", "input": {"task": "long-en"}, "expected": {"done": true}, "tags": {"lang": "en", "kind": "long"}}
+{"id": "done-en", "input": {"task": "done-en"}, "expected": {"done": true}, "tags": {"lang": "en", "kind": "done"}}

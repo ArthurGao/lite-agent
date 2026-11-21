@@ -1,0 +1,8 @@
+name: agent
+version: '2026-11-21'
+synthetic: true
+license: Apache-2.0
+description: 'S5 (lite-agent design §15): twelve tasks in a small deterministic shop (customers, orders,
+  stock, refunds, notes; src/lite_agent/evals/world.py), seven in English and five in Chinese. Each case
+  names a task of lite_agent.evals.TASKS; whether it was done is decided in code from the shop and the
+  event log afterwards. Fictional people only. Written from TASKS: a test keeps the two in step.'
