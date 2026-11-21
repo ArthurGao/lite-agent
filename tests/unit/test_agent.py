@@ -67,7 +67,15 @@ async def test_a_custom_runner_receives_the_agent_the_session_and_the_task() -> 
     seen: list[tuple[Agent, str | None, str | Resume]] = []
 
     class Spy(InProcessRunner):
-        async def run(self, agent: Agent, session_id: str | None, input: str | Resume) -> RunResult:
+        async def run(
+            self,
+            agent: Agent,
+            session_id: str | None,
+            input: str | Resume,
+            *,
+            run_id: str | None = None,
+            new_session: bool = False,
+        ) -> RunResult:
             seen.append((agent, session_id, input))
             return await super().run(agent, session_id, input)
 

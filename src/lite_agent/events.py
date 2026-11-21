@@ -310,3 +310,8 @@ def provenance_data(p: Provenance) -> ProvenanceData:
 
 def usage_data(u: Usage) -> UsageData:
     return UsageData.model_validate(u, from_attributes=True)
+
+
+def usage_of(u: UsageData) -> Usage:
+    """The other way: a recorded usage as lite-model's `Usage` (a run answered from its log)."""
+    return Usage(input=u.input, output=u.output, reasoning=u.reasoning, cost_usd=u.cost_usd)

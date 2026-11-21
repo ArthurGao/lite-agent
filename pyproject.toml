@@ -31,10 +31,16 @@ pg = [
 eval = [
     "lite-eval",
 ]
+# The HTTP shell (design §10, S6): `liteagent serve`. The versions lite-mem pins.
+server = [
+    "fastapi==0.162.2",
+    "uvicorn==0.54.0",
+]
 
 [dependency-groups]
 dev = [
-    "lite-agent[pg,eval]",  # the PostgreSQL store's and the eval target's tests run in CI
+    "lite-agent[pg,eval,server]",  # every extra's tests run in CI
+    "httpx==0.28.1",  # the HTTP shell's tests call the app in process (httpx.ASGITransport)
     "pytest>=8.3",
     "pytest-asyncio>=1.0",
     "ruff>=0.8",
