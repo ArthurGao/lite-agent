@@ -472,13 +472,13 @@ async def run_loop(agent: "Agent", session_id: str | None, input: str | Resume) 
     if given is not None and session_id is None:
         raise ValueError("resume() needs a session")
     run = _Run(agent, session_id or agent.ids(), agent.ids())
-    tools = tuple(ToolDef.model_validate(t, from_attributes=True) for t in agent.tools)
+    tools = tuple(ToolDef.model_validate(t, from_attributes=True) for t in agent.all_tools)
     opening: list[Pending] = [
         partial(
             RunStarted,
             role=agent.role,
             fallback_role=agent.fallback_role,
-            system=agent.system,
+            system=agent.system_prompt(),
             tools=tools,
         )
     ]
