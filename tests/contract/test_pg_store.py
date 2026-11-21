@@ -2,6 +2,7 @@
 back through the vocabulary's own check, and connection details stay out of error messages."""
 
 import json
+import secrets
 
 import psycopg
 import pytest
@@ -96,19 +97,27 @@ async def test_a_closed_store_says_so_and_does_not_reopen(pg_url: str, pg_schema
     await store.close()  # closing twice is harmless
 
 
+def fake_password() -> str:
+    """Made at run time: no credentialed URL is written in the source (secret scanners flag
+    one, and a fixed value could be special-cased by the code under test)."""
+    return secrets.token_hex(8)
+
+
 def test_every_secret_in_a_connection_string_is_hidden() -> None:
     from lite_agent.pg import redact_conninfo
 
-    shown = redact_conninfo("postgresql://u:pw1@h/db?sslpassword=pw2&sslmode=require")
-    assert "pw1" not in shown and "pw2" not in shown
+    first, second = fake_password(), fake_password()
+    shown = redact_conninfo(f"postgresql://u:{first}@h/db?sslpassword={second}&sslmode=require")
+    assert first not in shown and second not in shown
     assert "sslmode=require" in shown
 
 
 async def test_a_connection_failure_never_shows_the_password() -> None:
-    store = PgSessionStore("postgresql://someone:hunter2-secret@127.0.0.1:1/nowhere", schema="x_y")
+    password = fake_password()
+    store = PgSessionStore(f"postgresql://someone:{password}@127.0.0.1:1/nowhere", schema="x_y")
     with pytest.raises(StoreError) as caught:
         await store.read("s1")
-    assert "hunter2-secret" not in str(caught.value) and "***" in str(caught.value)
+    assert password not in str(caught.value) and "***" in str(caught.value)
     await store.close()
 
 
@@ -121,11 +130,12 @@ def test_a_schema_that_is_not_lite_agents_own_is_refused(schema: str) -> None:
 
 
 def test_settings_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LITEAGENT_DATABASE_URL", "postgresql://a:b@localhost/c")
+    url = f"postgresql://a:{fake_password()}@localhost/c"
+    monkeypatch.setenv("LITEAGENT_DATABASE_URL", url)
     monkeypatch.setenv("LITEAGENT_SCHEMA", "lite_agent_other")
     settings = Settings()
     assert (settings.database_url, settings.schema_name) == (
-        "postgresql://a:b@localhost/c",
+        url,
         "lite_agent_other",
     )
     monkeypatch.delenv("LITEAGENT_SCHEMA")
