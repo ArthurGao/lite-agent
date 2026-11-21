@@ -91,3 +91,24 @@ class InMemorySessionStore:
             raise EventRejected(f"session {child} already exists")
         self._parents[child] = (session_id, at_seq)
         return child
+
+
+async def copy_session(
+    source: SessionStore,
+    target: SessionStore,
+    session_id: str,
+    *,
+    new_session_id: str | None = None,
+) -> str:
+    """Write `session_id`'s events, inherited ones included, into `target` as a new session of
+    its own, and return its id (`new_session_id`, or a fresh one). A fork arrives flat: its
+    lineage is store metadata and does not travel. Nothing else changes, so under the same agent
+    the copy resumes, forks and compacts as the original would (design §4, §15 S4b). It is the
+    session as `source` held it when read: events appended after that are not in it. One batch:
+    the copy is whole or absent, and an id `target` already has is refused (SeqConflict)."""
+    if new_session_id == "":
+        raise ValueError("new_session_id must not be empty (None makes a fresh one)")
+    copied = new_session_id if new_session_id is not None else new_id()
+    events = [e.model_copy(update={"session_id": copied}) for e in await source.read(session_id)]
+    await target.append(copied, events, expected_seq=0)
+    return copied

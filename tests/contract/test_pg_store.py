@@ -153,3 +153,15 @@ async def test_a_second_store_object_sees_what_the_first_wrote(pg_url: str, pg_s
     assert [e.seq for e in await first.read("s1")] == [1, 2, 3]
     await first.close()
     await second.close()
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+async def test_listing_sessions_needs_a_positive_limit(
+    pg_url: str, pg_schema: str, limit: int
+) -> None:
+    store = PgSessionStore(pg_url, schema=pg_schema)
+    try:
+        with pytest.raises(ValueError, match="limit"):
+            await store.sessions(limit)
+    finally:
+        await store.close()

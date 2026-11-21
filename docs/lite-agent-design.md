@@ -148,6 +148,8 @@ class SessionStore(Protocol):
     async def fork(self, session_id: str, *, at_seq: int) -> str: ...
 # implementations: InMemorySessionStore; PgSessionStore (S4a, extra `pg`)
 
+async def copy_session(source, target, session_id, *, new_session_id=None) -> str: ...  # S4b: a fork arrives flat
+
 class Tool(Protocol):                           # the attributes are read-only properties
     name: str
     description: str
@@ -532,7 +534,7 @@ src/lite_agent/
   runner.py       Runner Protocol, InProcessRunner
   context/        skills.py, memory.py, compaction.py
   config.py       Settings (LITEAGENT_), startup validation
-  cli.py          liteagent run | sessions | show | resume | fork | config
+  cli.py          liteagent migrate | sessions | show | fork | config   (S4b; no run / resume, §15)
   config.py       Settings (LITEAGENT_DATABASE_URL, LITEAGENT_SCHEMA)
   pg/             PgSessionStore, db.py (migrations, vendored), migrations/  (extra: pg)
   mcp.py                                                 (extra: mcp)
@@ -825,7 +827,7 @@ docs/lite-agent-design.md
     接受任何异常；删掉没人用的 `kind` fixture。它顺带发现 `read(upto_seq=0)` 在 PG store 读出全部（真值判断），
     先写契约测试 `test_reading_up_to_seq_zero_reads_nothing` 见红再修。记下不做：一条递归 CTE 读整条血缘、
     `projection` 里用下标代替过滤（留给 S5 的测量）；错误信息里的 `liteagent migrate` 改为 `lite_agent.pg.migrate`，
-    S4b 有了 CLI 再改回。
+    S4b 有了 CLI 已改回。
   - **S4b 要先定的事（simplify 提出）**：继承来的事件保留原 session 的 `session_id`，`fork()` 的新 id 由 store 生成；
     所以 `copy_session` 只能把一个 fork 摊平成独立 session（事件改写 `session_id`），不能在目标 store 里重建血缘。
     S4b 的 plan 里写明。
@@ -841,10 +843,39 @@ docs/lite-agent-design.md
       会增长，并发写入只会让结果多出一个完整的批次（批次是原子的），返回的总是某个时刻的完整前缀。
     - "socket 守卫放行范围太宽"：放行的只是请求了测试数据库 fixture 的测试，URL 只来自显式设置的
       `LITEAGENT_TEST_DATABASE_URL`；这是测试代码，不是生产路径。
+- **S4b（2026-11-21）**：`copy_session`、`liteagent` CLI（`migrate`、`sessions`、`show [--json]`、`fork --at`、`config`）、
+  `PgSessionStore.sessions()` 和 `from_settings()`。测试先写。
+  - **`copy_session` 摊平 fork**（S4a simplify 提出，与 plan 一致）：继承来的事件在副本里一律改成新 session 的 id，
+    血缘不随副本走；一批写入，目标里已有这个 id 就 `SeqConflict`。
+  - **CLI 不做 `run` / `resume`**（与 §14 原来的列表不同）：一次 run 要宿主的 tool、gate、完成条件，都是 Python
+    对象，命令行给不出来；一个没有 tool 的 run 用处不大，还会被当成入口。
+  - 规则 → 测试：进程 A 暂停、进程 B 批准并完成 `test_a_run_paused_in_one_process_is_approved_and_finished_in_another`；
+    进程死在 tool 里，下一个进程不重跑、要求核对 `test_a_process_that_died_inside_a_tool_leaves_a_call_the_next_one_reconciles`
+    （让非幂等调用照样重跑，它会失败）；一个进程 fork、另一个接着跑 `test_a_session_forked_in_one_process_runs_on_in_another`
+    （让 store 不读继承的事件，它会失败）。每一步都是新的 Python 进程（`tests/contract/agent_process.py`），只共用数据库。
+    内存 store 的 session 搬进 PG 后用另一个 `Agent` 恢复 `test_a_paused_session_copied_into_another_store_resumes_there`；
+    fork 的 fork 里一次压缩跨过两个 fork 点、三层投影都对 `test_a_fork_of_a_fork_compacts_across_both_fork_points`
+    （两种 store 各一遍；S3b 只测过一层）；CLI 每个命令一条，输出逐行断言（`tests/contract/test_cli.py`）。
+  - 收尾 `/simplify`：采纳——`sessions()` 先 `LIMIT` 再按主键逐行取尾部和最后结局（原来先 `GROUP BY` 整张 `events`）；
+    CLI 里 store 有了类型（原来是 `Any`）；"没配数据库"的提示只留一份（`config.NO_DATABASE`）；测试里的 `Ask` 和
+    "开一个 store 读完关掉"提到 `tests/helpers.py`。记下不做：给 `migrate` 一个按 URL 的库入口（加公共接口，等需要）；
+    `sessions.created_at` 的索引（等 session 多到要用）。
+  - 收尾 Codex（只读）：采纳——`copy_session(new_session_id="")` 报错，不再悄悄换成新 id；`sessions(limit)` 小于 1
+    报错；CLI 的设置出错是一行、不带值（`LITEAGENT_SCHEMA=public` 原来是 traceback）；`migrate` 的任何 psycopg 错误
+    都只给脱敏后的信息（原来只处理 `OperationalError`）；`show` 把控制字符写成转义（存进去的文本不能驱动终端），
+    截断的行以 `…` 结尾，`--json` 另把 DEL 和 C1 写成 `\u` 转义（JSON 本身只转义 C0）；`copy_session` 的说明改成
+    "同一个 agent 下"等价，并写明它是读取那一刻的快照。七条都先写测试见红。否决或只记下：
+    - "复制一个还在运行的 session 会得到过期的副本"：副本是读取那一刻的完整前缀（只追加、批次原子），和 fork 一样
+      是快照；"源为空时什么都不写"不会发生——存在的 session 至少有 `session_started`。
+    - "很长的 session 一次读进内存、一批写入"：记进 §16；分批又要全有或全无，得在 store 里加事务接口。
+    - "`config` 会显示 `sslkey` 这类路径"：路径不是凭据；凡是 `*password*` 的参数都已隐藏。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 
 ## 16. 待确认
+
+- **很长的 session 的复制**（S4b Codex）：`copy_session` 把整个 session 读进内存、一批写入；分批而仍全有或全无
+  需要 store 提供事务，等真有这么长的 session 再定。
 
 - **迁移运行器不认识的版本**（S4a Codex）：`pending()` 对 `schema_migrations` 里出现、包里却没有的版本
   （更新的代码迁移过的库）不报错。三个仓库共用这份代码，要改一起改。
