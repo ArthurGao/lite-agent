@@ -31,7 +31,8 @@ CI runs there. S2 is done in three parts (design §15): **S2a done 2026-11-21** 
 Pydantic validation, result truncation, tool timeouts, token and cost budgets. **S2b done 2026-11-21** — gates, `paused` runs,
 `resume()` (approval, tools the host executes, calls an interrupted run left open). **S2c done 2026-11-21** —
 a completion condition with automatic continuation, cut-off text asked to go on, `fallback_role`. S2 is
-complete. Next: S3 (skills, compaction, the `Memory` protocol).
+complete. S3 is done in two parts: **S3a done 2026-11-21** — skills (an index in
+the system prompt, `load_skill`) and memory (`recall` / `remember`). Next: S3b (compaction).
 
 ## Rules
 

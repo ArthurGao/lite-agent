@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from lite_model import AsyncToolModel
 
 from lite_agent.budget import Budget
+from lite_agent.context import Memory, SkillSource, build
 from lite_agent.events import Event
 from lite_agent.gates import Gate
 from lite_agent.result import Resume, RunResult
@@ -35,26 +36,41 @@ class Agent:
     # turn, return None when it is, or what is still open, which is sent back to the model.
     # Without it a text-only turn ends the run.
     done: Callable[[Sequence[Event]], str | None] | None = None
+    # Instructions the model loads on demand, and notes that outlast a session (design §6).
+    # Each adds its tools after the host's (`load_skill`; `recall` and `remember`).
+    skills: SkillSource | None = None
+    memory: Memory | None = None
     sessions: SessionStore = field(default_factory=InMemorySessionStore)
     budget: Budget = field(default_factory=Budget)
     runner: Runner = field(default_factory=InProcessRunner)
     clock: Callable[[], datetime] = _now  # event times
     ids: Callable[[], str] = new_id  # session and run ids
+    # Set when the agent is built, and fixed from then on. `tools` stays what the host gave.
+    all_tools: tuple[Tool, ...] = field(init=False, repr=False, compare=False)
+    _system: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.role:
             raise ValueError("Agent.role must name a lite-model role")
         if self.fallback_role is not None and self.fallback_role in ("", self.role):
             raise ValueError("Agent.fallback_role must name another lite-model role")
+        context = build(self.system, self.skills, self.memory, limit=self.budget.skills_index_chars)
         object.__setattr__(self, "tools", tuple(self.tools))
-        names = [t.name for t in self.tools]
+        object.__setattr__(self, "all_tools", (*self.tools, *context.tools))
+        object.__setattr__(self, "_system", context.system)
+        names = [t.name for t in self.all_tools]
         repeated = sorted({n for n in names if names.count(n) > 1})
         if repeated:
             raise ValueError(f"tool names must be unique: {', '.join(repeated)}")
         object.__setattr__(self, "gates", tuple(self.gates))
 
+    def system_prompt(self) -> str:
+        """The system prompt every run of this agent is opened with: the host's, then what
+        skills and memory add, as it was assembled when the agent was built."""
+        return self._system
+
     def tool(self, name: str) -> Tool | None:
-        return next((t for t in self.tools if t.name == name), None)
+        return next((t for t in self.all_tools if t.name == name), None)
 
     async def run(self, task: str, *, session_id: str | None = None) -> RunResult:
         """Run `task` to an outcome. With `session_id`, as the next run of that session."""

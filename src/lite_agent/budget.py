@@ -21,6 +21,7 @@ class Budget:
     tool_result_chars: int = 20_000  # a longer result is cut when it is written
     tool_timeout_s: float = 60.0  # for a tool without its own `timeout_s`
     auto_continues: int = 2  # per run (design §5 rule 3)
+    skills_index_chars: int = 4_000  # the skills index in the system prompt may not pass this
 
     def __post_init__(self) -> None:
         if self.turns < 1:
@@ -35,6 +36,8 @@ class Budget:
             raise ValueError("Budget.tool_timeout_s must be a positive number")
         if self.auto_continues < 0:
             raise ValueError("Budget.auto_continues must not be negative")
+        if self.skills_index_chars < 1:
+            raise ValueError("Budget.skills_index_chars must be at least 1")
 
 
 @dataclass(frozen=True)

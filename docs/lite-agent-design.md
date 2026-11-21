@@ -100,7 +100,9 @@ class Agent:
     ids: Callable[[], str] = ...                # session and run ids
     gates: Sequence[Gate] = ()                  # S2b: asked in order before a tool runs (§8)
     done: Callable[[Sequence[Event]], str | None] | None = None   # S2c: None = done; text = still open
-    # S3: skills, memory, compaction
+    skills: SkillSource | None = None           # S3a: index in the system prompt + `load_skill`
+    memory: Memory | None = None                # S3a: `recall` / `remember`
+    # S3b: compaction
 
     async def run(self, task: str, *, session_id: str | None = None) -> RunResult: ...
     async def resume(self, session_id: str, input: Resume | None = None) -> RunResult: ...   # S2b
@@ -214,7 +216,6 @@ class Runner(Protocol):                         # where the loop's steps execute
 | `model_turn` | lite-model 的 `AssistantTurn.blocks`，按端点给的顺序原样保存（`Text`、`ToolCall`、`Opaque`——Anthropic 的 thinking block）；`stop`、role、provenance、usage | 是 |
 | `tool_started` | `call_id`、tool 名、参数、`external`；过了校验和 gate、在执行（或交给宿主执行）**之前**写。校验失败、`Deny`、`PauseFor` 都不写它（§8） | 否 |
 | `tool_result` | `call_id`、内容（已截断）、`is_error`、`error_kind`（`invalid_args` / `denied` / `exception` / `timeout` / `truncated_turn` / `outcome_unknown`）、`executed`（tool 是否被调用过）、`origin`（`executed` / `external` / `reconciled`）、`terminal`、原始长度 | 是 |
-| `context_added` | skill / memory 注入的文本（写入时已包好外层标签） | 是 |
 | `compaction` | 摘要、覆盖的 seq 区间、做摘要的 role、provenance、usage | 是（替代被覆盖的区间） |
 | `paused` / `resumed` | `paused.waiting`：每个等待的 call 一项（`call_id`、原因 `approval` / `tool` / `reconcile`、gate 给人看的说明）；`resumed`：`approve`（call id → 是否批准）和带了结果的 call id 列表（结果本身在 `tool_result` 里） | 否 |
 | `model_error` | 失败调用的错误类型、role、`purpose`（`turn` / `compact`）、usage（拿不到时为 `None`） | 否 |
@@ -325,12 +326,32 @@ class Runner(Protocol):                         # where the loop's steps execute
 
 ## 6. Context：system、skills、memory、压缩
 
-- **system prompt** 是 `run_started` 快照的一部分，一次 run 之内不变（§4、§5 规则 4）。
-- **skills**（`SkillSource` Protocol；默认实现读 `SKILL.md` 目录，格式与 Claude Code / cairn 相同）：system 里
-  只放索引（名字 + 一行描述），正文由模型通过 `load_skill` tool 按需加载。索引有 token 预算，超出报错，
-  不静默全量加载（cairn `ContextBudgetError`）。
-- **memory**（`Memory` Protocol：`recall(query)`、`remember(note)`）：默认没有。`lite-agent[mem]` 提供
-  lite-mem 的 adapter。prompt 只说 memory 用来做什么，不写死记录规则（KB §13.1）。
+- **system prompt** 是 `run_started` 快照的一部分，一次 run 之内不变（§4、§5 规则 4）。快照里存的是**拼好的
+  全文**（`context.build()`，在构造 `Agent` 时拼一次，之后不变）：宿主给的 `system`，然后是 skills 的索引段，然后是 memory 的说明段，空的部分
+  跳过。拼装是纯函数，同一个 `Agent` 每次得到逐字相同的结果（prompt cache 靠它）；发给模型的就是 log 里这一份。
+- **没有 `context_added` 事件**（2026-11-21 从事件表里去掉）：skills 的正文和 memory 的内容都以 tool 结果的形式
+  进 log，system 的部分在 `run_started` 里，没有第三种"注入的文本"。
+- **skills**（S3a；`SkillSource` 协议：`index()` 给名字和一行描述，`load(name)` 给正文）。默认实现 `SkillDir(root)`
+  读 `<root>/<name>/SKILL.md`，格式与 Claude Code / cairn 相同：开头的 frontmatter 里有 `name` 和 `description`，
+  其余是正文。只读这两个键，值按单行的纯文本取（不处理引号和折行），自己解析，不引入 YAML 依赖。构造时读
+  一遍：没有 frontmatter、缺字段、同一个键出现两次、`name` 和目录名不一致，当场报错。**skill 文件是宿主自己的
+  文件，按可信内容对待**：名字和描述原样进 system prompt，正文原样作为 tool 结果给模型；目录里的符号链接照常
+  跟随。
+  - system 里只放索引（一行一个：名字和描述，按名字排序）和一句"对得上就先用 `load_skill` 读"。索引的条目
+    （不含那句固定的说明）超过 `Budget.skills_index_chars`（默认 4000）时构造 `Agent` 就报错，不截断、不静默全量加载（cairn 的
+    `ContextBudgetError`）。
+  - 给了 `skills` 就自动多一个 tool `load_skill(name)`：返回正文；名字不存在是一条普通的 tool 错误，并列出有哪些。
+- **memory**（S3a；`Memory` 协议：`async recall(query) -> str`、`async remember(note)`）：默认没有。给了就自动多
+  两个 tool `recall` / `remember`，system 里加一小段，只说 memory 是做什么的，不写"什么时候记、记什么"的规则
+  （KB §13.1）。run 开始时不自动 `recall`：要不要先查按模型而定（KB §13.3），由宿主的 system 决定。库里带一个
+  `NotesMemory`（内存里的列表，按共同的词查找），给测试和单进程脚本用，不是检索引擎；lite-mem 的 adapter 仍在
+  "按需"里。`Memory` 的实现抛出的异常和别的 tool 一样，连同消息文字回给模型（§5 规则 7）：消息里放什么由实现
+  负责。
+- system prompt 和内置 tool 在构造 `Agent` 时定下来（`Agent.system_prompt()`、`Agent.all_tools`），之后 skills 的
+  来源再变也不影响这个 `Agent` 发出去的索引——预算检查的就是发出去的那一份。`Agent.tools` 保持宿主给的原样。
+  换了 skills 再跑同一个 session，快照就变了，之前的 thinking block 不再进投影（§4），与换 system 的代价相同。
+- 这三个内置 tool 排在宿主的 tool 之后，和宿主的 tool 走同一条路：校验、gate、超时、事件一样不少（所以宿主的
+  gate 可以拦 `remember`）。与宿主的 tool 重名时构造 `Agent` 报错。
 - **压缩**（`Compactor` Protocol）。不给 `compaction` 就不压缩，超出上下文是一次普通的失败。库里自带一个
   实现 `SummaryCompactor(context_tokens={role: n}, keep_turns=N)`，要用时由宿主传入：
   - 投影的 token 估算超过**当前要调用的 role** 的阈值时，把"最近 N 轮之前"的全部模型可见事件交给
@@ -683,6 +704,31 @@ docs/lite-agent-design.md
     "续跑次数用完后可以靠反复 `resume()` 无限续"：它假设 log 以续跑消息结尾，实际用完时写的是 `model_turn` 和
     `run_finished`，`resume()` 会拒绝（"nothing to resume"）；要继续只能 `run()` 一个新任务，而 turn / token 预算
     是按 session 算的。没有跑第二轮 Codex。
+- **S3a（2026-11-21）**：`context.py`（`SkillSource` / `SkillDir` / `SkillInfo`、`Memory` / `NotesMemory`、
+  `build()`、三个内置 tool）、`Agent.skills` / `memory` / `system_prompt()` / `all_tools`、`Budget.skills_index_chars`。测试先写
+  （`tests/unit/test_skills_memory.py`）；实现一次写完后做逐行破坏：17 处里 15 处变红，剩下 2 处（frontmatter 不在
+  第一行、宿主没给 system 时开头多出空行）补了测试后变红。
+  - 真实模型：本机 Ollama 的 qwen3:8b，给一个 skills 目录和一个 `NotesMemory`，问"先跑哪条命令"并要求记一条
+    笔记。模型自己调了 `load_skill("deploy")`，答出了只在 skill 正文里出现的命令，也调了 `remember`。
+  - 规则 → 测试：索引进 system 且与 log 一致 `test_the_skill_index_is_in_the_system_prompt_as_logged`；组装稳定
+    `test_the_assembled_prompt_is_the_same_every_time`；按需加载 `test_load_skill_returns_the_body_as_a_tool_result`、
+    `test_loading_an_unknown_skill_is_a_tool_error_that_names_the_real_ones`；预算
+    `test_an_index_over_its_budget_is_refused_when_the_agent_is_built`；坏的 skill
+    `test_a_malformed_skill_is_refused_when_the_directory_is_read`；memory
+    `test_remember_and_recall_go_through_the_memory_and_the_log`、
+    `test_the_memory_prompt_says_what_memory_is_for_and_scripts_nothing`、
+    `test_a_gate_can_refuse_remember_like_any_other_tool`；不给时不变
+    `test_without_skills_or_memory_the_prompt_and_tools_are_the_hosts_own`。
+  - `/simplify`（一路，四个角度）：采纳——内置 tool 原来写回 `Agent.tools`，`dataclasses.replace()` 一个带 memory 的
+    agent 会因为"重名"失败（回归测试先红）：现在 `tools` 保持宿主给的，合并后的在 `all_tools`；预算检查的是构造时的
+    索引、每次 run 却重新读来源，来源变大后会发出没检查过的索引（回归测试先红）：现在 prompt 在构造时定下来；
+    `_parse` 不再用异常做流程控制；拼装和内置 tool 收进 `context.build()`。
+  - Codex 只读 review：7 Medium、2 Low。修复（回归测试先红）——frontmatter 里重复的键被静默覆盖；带 BOM 的
+    `SKILL.md` 读不了；索引的顺序取决于来源给的顺序（现在按名字排序）；`NotesMemory` 只去掉句号，带逗号的词查
+    不到；只有空白的笔记能存进去。写明——skill 文件按可信内容对待；预算只算条目；`Memory` 的异常消息会回给模型。
+    否决——"符号链接可以读到根目录之外"（宿主自己的目录）；"恢复被打断的 `load_skill` 时 skill 可能已经变了"
+    （它读的是现在的内容，这就是按需加载的意思）；"稳定性测试比的是一个空目录"（两个 agent 用的是同一个目录）。
+    补测试——被打断的 `remember` 等人核对、不重跑。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 

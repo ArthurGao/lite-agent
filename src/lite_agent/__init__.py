@@ -2,6 +2,7 @@
 
 from lite_agent.agent import Agent
 from lite_agent.budget import Budget
+from lite_agent.context import Memory, NotesMemory, SkillDir, SkillInfo, SkillSource
 from lite_agent.errors import (
     AgentError,
     EventRejected,
@@ -30,7 +31,9 @@ __all__ = [
     "HarnessError",
     "InMemorySessionStore",
     "InProcessRunner",
+    "Memory",
     "ModelTool",
+    "NotesMemory",
     "Pause",
     "PauseFor",
     "Projection",
@@ -41,6 +44,9 @@ __all__ = [
     "Runner",
     "SeqConflict",
     "SessionStore",
+    "SkillDir",
+    "SkillInfo",
+    "SkillSource",
     "StoreError",
     "Tool",
     "ToolContext",
