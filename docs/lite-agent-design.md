@@ -1104,6 +1104,8 @@ docs/lite-agent-design.md
     预期中的行为变化，不是为了让测试通过而改测试。
 - **v0.2.0（2026-11-21）**：S6 与 S7 的发版。公共接口的加法：`Agent.run` / `resume` 的 `run_id`、`new_session`，`Runner.run` 同步；
   extra `server`、`temporal`；迁移 `0002`、`0003`（inbox）。事件词汇表没有变（`tests/unit/test_vocabulary.py` 的 V=1 指纹不变）。
+  发版：tag `v0.2.0`（`b8b2d41`），CI run 44885745742 的 test / package / release 全部成功。发版后的验收：一个全新的项目从 Release 的
+  URL 装上全部 extra（`pg`、`server`、`temporal`，带上 lite-model 0.4.0），新模块都能导入，README 的例子在本机 qwen3:8b 上跑出 `completed`。
   Release：`https://github.com/ArthurGao/lite-agent/releases/download/v0.2.0/lite_agent-0.2.0-py3-none-any.whl`。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
