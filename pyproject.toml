@@ -36,10 +36,15 @@ server = [
     "fastapi==0.162.2",
     "uvicorn==0.54.0",
 ]
+# The durable runner (design §9, S7): Temporal workflows and activities. Tests run on the
+# SDK's time-skipping test server, which it downloads once.
+temporal = [
+    "temporalio==1.36.1",
+]
 
 [dependency-groups]
 dev = [
-    "lite-agent[pg,eval,server]",  # every extra's tests run in CI
+    "lite-agent[pg,eval,server,temporal]",  # every extra's tests run in CI
     "httpx==0.28.1",  # the HTTP shell's tests call the app in process (httpx.ASGITransport)
     "pytest>=8.3",
     "pytest-asyncio>=1.0",
@@ -81,4 +86,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 # Opt-in, deselected by default: `uv run pytest -m ollama` (the real Ollama on the host).
 addopts = "-m 'not ollama'"
-markers = ["ollama: talks to the real local Ollama (opt-in: uv run pytest -m ollama)"]
+markers = [
+    "ollama: talks to the real local Ollama (opt-in: uv run pytest -m ollama)",
+    "temporal: runs on Temporal's time-skipping test server (local; downloaded once; runs by default)",
+]

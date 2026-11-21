@@ -1,5 +1,5 @@
 """Shared test setup. Tests never open a socket (AGENTS.md rule 11): only tests marked `ollama`
-(opt-in) may reach a real server."""
+(opt-in) may reach a real server, and tests marked `temporal` their local test server."""
 
 import socket
 from collections.abc import Iterator
@@ -7,7 +7,9 @@ from typing import Any
 
 import pytest
 
-LIVE_MARKERS = {"ollama"}
+# ollama: the real local model (opt-in). temporal: the SDK's own test server, started and
+# stopped by the test (it downloads the server once); it runs by default.
+LIVE_MARKERS = {"ollama", "temporal"}
 
 
 def uses_postgres(request: pytest.FixtureRequest) -> bool:

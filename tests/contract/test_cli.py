@@ -212,3 +212,13 @@ def test_serve_refuses_a_non_loopback_host_and_a_bad_agents_file(tmp_path: Any) 
         broken.exit_code == 1
         and broken.stderr == "error: agent 'a': cannot import tests.contract.nowhere:clock\n"
     )
+
+
+def test_worker_refuses_a_bad_agents_file_before_it_connects(tmp_path: Any) -> None:
+    bad = tmp_path / "bad.toml"
+    bad.write_text(
+        '[store]\nkind = "memory"\n[agents.a]\nfactory = "tests.contract.nowhere:clock"\n'
+    )
+    shown = runner.invoke(app, ["worker", "--agents", str(bad)])
+    assert shown.exit_code == 1
+    assert shown.stderr == "error: agent 'a': cannot import tests.contract.nowhere:clock\n"
