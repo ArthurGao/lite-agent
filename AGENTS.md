@@ -32,7 +32,9 @@ Pydantic validation, result truncation, tool timeouts, token and cost budgets. *
 `resume()` (approval, tools the host executes, calls an interrupted run left open). **S2c done 2026-11-21** —
 a completion condition with automatic continuation, cut-off text asked to go on, `fallback_role`. S2 is
 complete. S3 is done in two parts: **S3a done 2026-11-21** — skills (an index in
-the system prompt, `load_skill`) and memory (`recall` / `remember`). Next: S3b (compaction).
+the system prompt, `load_skill`) and memory (`recall` / `remember`). **S3b done 2026-11-21** — compaction: a summary event that masks the
+history it covers, `SummaryCompactor`. S3 is complete. Next: S4 (a PostgreSQL session store, resume and
+fork across processes, the CLI).
 
 ## Rules
 

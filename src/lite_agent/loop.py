@@ -4,13 +4,15 @@ request is derived from them; the loop keeps no message list of its own."""
 import asyncio
 from collections.abc import Callable
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from lite_model import AssistantTurn, CallFailed, ModelError, ToolCall, Usage
 
 from lite_agent.budget import add_usage, spent
+from lite_agent.compaction import SUMMARY, Compactor
 from lite_agent.errors import HarnessError, StoreError, UnknownSession, UnresolvedCalls
 from lite_agent.events import (
+    Compaction,
     ErrorKind,
     Event,
     ModelErrorEvent,
@@ -33,7 +35,7 @@ from lite_agent.events import (
     usage_data,
 )
 from lite_agent.gates import Allow, Deny, PauseFor, RunContext
-from lite_agent.projection import Projection, derive, last_turn, unanswered_calls
+from lite_agent.projection import Projection, derive, history, last_turn, unanswered_calls
 from lite_agent.result import Pause, Resume, RunError, RunResult, ToolOutcome, Waiting
 from lite_agent.tools import Tool, ToolContext
 
@@ -364,6 +366,56 @@ class _Run:
             return await self.finish("completed", "terminal_tool", text=text)
         return None
 
+    def failure(
+        self, exc: ModelError, role: str, purpose: Literal["turn", "compact"] = "turn"
+    ) -> Pending:
+        """A model call that failed, as the event to write; what it spent is added to the run's
+        usage here, so a failed call is billed wherever it happens (§5 rule 6)."""
+        self.usage = add_usage(self.usage, exc.usage)
+        usage = usage_data(exc.usage) if exc.usage is not None else None
+        return partial(
+            ModelErrorEvent, error=type(exc).__name__, role=role, purpose=purpose, usage=usage
+        )
+
+    async def compact(self, compactor: Compactor, cut: int) -> RunResult | None:
+        """Have the compact role summarise the history up to `cut` and record that the summary
+        stands for it (§6). Returns the run's result if the summary could not be written: a run
+        whose history is too long is not sent on as it is, to fail again less clearly."""
+        agent = self.agent
+        ask = compactor.prompt(history([e for e in self.log if e.seq <= cut]))
+        try:
+            reply = await agent.model.turn(agent.compact_role, ask, ())
+        except ModelError as exc:
+            await self.append(self.failure(exc, agent.compact_role, "compact"))
+            error = RunError("model", type(exc).__name__)
+            return await self.finish("failed", "error", error=error)
+        self.usage = add_usage(self.usage, reply.usage)
+        if reply.stop == "length":
+            # half a summary must not stand for the whole history: the call is recorded as a
+            # failed one (it was billed) and the run ends, as for any summary that was not written
+            name = "TruncatedSummary"
+            cut_off = partial(
+                ModelErrorEvent,
+                error=name,
+                role=agent.compact_role,
+                purpose="compact",
+                usage=usage_data(reply.usage),
+            )
+            await self.append(cut_off)
+            return await self.finish("failed", "error", error=RunError("model", name))
+        first = next(e.seq for e in self.log if isinstance(e, UserMessage | ModelTurn))
+        await self.append(
+            partial(
+                Compaction,
+                summary=SUMMARY.format(summary=reply.turn.text),
+                covers=(first, cut),
+                role=agent.compact_role,
+                provenance=provenance_data(reply.provenance),
+                usage=usage_data(reply.usage),
+            )
+        )
+        return None
+
     async def loop(self) -> RunResult:
         agent = self.agent
         while True:
@@ -371,14 +423,21 @@ class _Run:
                 return await self.finish("failed", used_up)
             request = await self.projection()
             role = self.role()
+            compactor = agent.compaction
+            if compactor is not None and compactor.due(request, role):
+                # at most once before a call: a compactor that is always due cannot loop
+                cut = compactor.cut(self.log)
+                if cut is not None:  # nothing it may cut: the call goes out as it is
+                    if (ended := await self.compact(compactor, cut)) is not None:
+                        return ended
+                    if (used_up := self.over_budget()) is not None:  # the summary was paid for
+                        return await self.finish("failed", used_up)
+                    request = await self.projection()
             try:
                 reply = await agent.model.turn(role, request.messages, request.tools)
             except ModelError as exc:
                 # after lite-model's own retries on the same model (§5 rule 9)
-                self.usage = add_usage(self.usage, exc.usage)
-                name = type(exc).__name__
-                usage = usage_data(exc.usage) if exc.usage is not None else None
-                failed = partial(ModelErrorEvent, error=name, role=role, usage=usage)
+                failed, name = self.failure(exc, role), type(exc).__name__
                 fallback = agent.fallback_role
                 if isinstance(exc, CallFailed) and fallback is not None and not self.switched():
                     # §5 rule 11: only a model that could not be reached, and once per run. The

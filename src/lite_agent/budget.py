@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from lite_model import Usage
 
-from lite_agent.events import Event, ModelErrorEvent, ModelTurn
+from lite_agent.events import Compaction, Event, ModelErrorEvent, ModelTurn
 
 
 @dataclass(frozen=True)
@@ -52,9 +52,11 @@ def spent(events: Sequence[Event]) -> Spent:
     unknown counts as a turn and adds nothing else: usage is never estimated."""
     turns, tokens, cost = 0, 0, 0.0
     for e in events:
-        if not isinstance(e, ModelTurn | ModelErrorEvent):
+        if not isinstance(e, ModelTurn | ModelErrorEvent | Compaction):
             continue
-        turns += 1
+        # a call that wrote, or failed to write, a summary is billed but is not a turn
+        if isinstance(e, ModelTurn) or (isinstance(e, ModelErrorEvent) and e.purpose == "turn"):
+            turns += 1
         if e.usage is not None:
             tokens += (e.usage.input or 0) + (e.usage.output or 0)
             cost += e.usage.cost_usd or 0.0

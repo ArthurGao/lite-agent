@@ -102,7 +102,8 @@ class Agent:
     done: Callable[[Sequence[Event]], str | None] | None = None   # S2c: None = done; text = still open
     skills: SkillSource | None = None           # S3a: index in the system prompt + `load_skill`
     memory: Memory | None = None                # S3a: `recall` / `remember`
-    # S3b: compaction
+    compaction: Compactor | None = None         # S3b: None = nothing is summarised
+    compact_role: str = "compact"               # S3b: the lite-model role that writes summaries
 
     async def run(self, task: str, *, session_id: str | None = None) -> RunResult: ...
     async def resume(self, session_id: str, input: Resume | None = None) -> RunResult: ...   # S2b
@@ -216,9 +217,9 @@ class Runner(Protocol):                         # where the loop's steps execute
 | `model_turn` | lite-model 的 `AssistantTurn.blocks`，按端点给的顺序原样保存（`Text`、`ToolCall`、`Opaque`——Anthropic 的 thinking block）；`stop`、role、provenance、usage | 是 |
 | `tool_started` | `call_id`、tool 名、参数、`external`；过了校验和 gate、在执行（或交给宿主执行）**之前**写。校验失败、`Deny`、`PauseFor` 都不写它（§8） | 否 |
 | `tool_result` | `call_id`、内容（已截断）、`is_error`、`error_kind`（`invalid_args` / `denied` / `exception` / `timeout` / `truncated_turn` / `outcome_unknown`）、`executed`（tool 是否被调用过）、`origin`（`executed` / `external` / `reconciled`）、`terminal`、原始长度 | 是 |
-| `compaction` | 摘要、覆盖的 seq 区间、做摘要的 role、provenance、usage | 是（替代被覆盖的区间） |
+| `compaction` | `summary`（模型看到的全文，含固定的前言）、`covers`（覆盖的 seq 区间，两端都含）、做摘要的 role、provenance、usage | 是（替代被覆盖的区间） |
 | `paused` / `resumed` | `paused.waiting`：每个等待的 call 一项（`call_id`、原因 `approval` / `tool` / `reconcile`、gate 给人看的说明）；`resumed`：`approve`（call id → 是否批准）和带了结果的 call id 列表（结果本身在 `tool_result` 里） | 否 |
-| `model_error` | 失败调用的错误类型、role、`purpose`（`turn` / `compact`）、usage（拿不到时为 `None`） | 否 |
+| `model_error` | 失败调用的错误类型、role、`purpose`（`turn`，或 `compact`：一次没写成的摘要）、usage（拿不到时为 `None`） | 否 |
 | `model_switched` | from / to role、原因（§5 规则 11） | 否 |
 | `run_finished` | outcome、stop、usage 合计 | 否 |
 
@@ -352,16 +353,28 @@ class Runner(Protocol):                         # where the loop's steps execute
   换了 skills 再跑同一个 session，快照就变了，之前的 thinking block 不再进投影（§4），与换 system 的代价相同。
 - 这三个内置 tool 排在宿主的 tool 之后，和宿主的 tool 走同一条路：校验、gate、超时、事件一样不少（所以宿主的
   gate 可以拦 `remember`）。与宿主的 tool 重名时构造 `Agent` 报错。
-- **压缩**（`Compactor` Protocol）。不给 `compaction` 就不压缩，超出上下文是一次普通的失败。库里自带一个
-  实现 `SummaryCompactor(context_tokens={role: n}, keep_turns=N)`，要用时由宿主传入：
-  - 投影的 token 估算超过**当前要调用的 role** 的阈值时，把"最近 N 轮之前"的全部模型可见事件交给
-    `compact` role 做一次摘要。切点不落在一个 tool call 和它的结果之间。
-  - 主 role 或 `fallback_role` 在 `context_tokens` 里没有阈值时，构造 `Agent` 就报 `ConfigError`。
-  - 成功：写一条 `compaction` 事件（摘要、覆盖的 seq 区间、role、provenance、usage）。失败：写
-    `model_error`（`purpose=compact`），run 失败。要压缩的内容连 `compact` role 也装不下，同样是失败。
-  - 覆盖的区间可以跨过 fork 点（子 session 的 seq 接着父 session 的往下排，§4）。
-  - 压缩之后，保留下来的最近 N 轮里的 `Opaque` 不再进投影（§4）：这正是 Claude API 文档对"保留最近几轮
-    原文"的压缩给的做法。不在一个 tool call 和它的结果之间压缩，也是同一份文档的要求。
+- **压缩**（S3b；`Compactor` 协议：`check(roles)`、`due(projection, role)`、`cut(events)`、`prompt(history)`）。
+  不给 `compaction` 就不压缩，超出上下文是一次普通的模型失败。库里自带 `SummaryCompactor(context_tokens={role: n},
+  keep_turns=6)`：
+  - **什么时候**：每次模型调用之前、预算检查之后。把要发的请求按"字符数 ÷ 3.5"估成 token（消息文本、tool
+    参数、tool 结果、tool 定义都算；这是估算，不是计数），超过**这一次要调用的 role** 的阈值就压缩。切换到
+    `fallback_role` 之后按它的阈值。主 role 或 `fallback_role` 没有阈值时，构造 `Agent` 就报错。
+  - **切在哪**：保留最近 `keep_turns` 个 `model_turn`（连同各自的 tool 结果），覆盖它们之前的全部。切点是"第一
+    个保留的轮次之前的那个 seq"，所以不会拆开 call 和结果，最后一轮永远保留。已经被摘要覆盖的轮次不再算数；
+    没有新的可切就不压缩，请求照原样发出。
+  - **怎么做**：把要覆盖的那段历史（如果前面已有摘要，摘要也在里面）渲染成纯文本，用 `Agent.compact_role` 调
+    一次 `turn(role, messages, tools=())`。成功 → 写一条 `compaction` 事件，再查一次预算（摘要是花了钱的），然后
+    重新投影再调主模型。失败 → 写 `model_error`（`purpose=compact`），run 以 `failed` 结束；被输出上限截断的摘要
+    同样算失败（`TruncatedSummary`，带这次调用的 usage）：半截摘要不能顶替整段历史。每次模型调用之前最多压缩
+    一次，所以一个永远说"该压缩"的 compactor 不会让 loop 空转。摘要写不成不触发 `fallback_role`，也不"不压缩接着
+    跑"——历史超长的请求原样发出去多半再失败一次，原因更难看出来。
+  - **投影**：只有最近一条 `compaction` 起作用（后一次压缩总是从头覆盖，把前一次的摘要也吃进去）。seq 不大于
+    `covers` 上界的模型可见事件不再输出，开头换成一条 user 消息，内容就是事件里的 `summary`——那句固定的前言在
+    写事件时已经拼进去了，投影不加任何文字。原事件都留在 log 里。
+  - **预算**：摘要调用计入 token 和成本，不算 turn（`budget.spent()`）；失败的摘要调用同样。
+  - **`Opaque`**：最近一条 `compaction` 之前产生的 thinking block 不再进投影，包括被保留下来的那几轮（§4）。
+  - 覆盖的区间可以跨过 fork 点（子 session 的 seq 接着父 session 往下排）；父 session 在 fork 之后做的压缩，
+    子 session 读不到。
 
 ## 7. Tools
 
@@ -529,7 +542,7 @@ docs/lite-agent-design.md
 | S0 | 骨架：`git init`、pyproject（uv、ruff、mypy strict、pytest）、CI、`.gitignore`（含 `!CLAUDE.md`）、`.env.example`、README、LICENSE；依赖 lite-model wheel；更新 workspace `AGENTS.md` | ruff、mypy、pytest 全绿；socket 被拒绝的测试存在 |
 | S1 | 核心：事件与校验、`InMemorySessionStore`、`derive_messages`、loop（§5 规则 1、2、6、7）、`Agent.run`、`InProcessRunner`；§3 的 `Agent` / `SessionStore` / `Runner` 接口定稿 | 用 Fake 脚本化：两轮 tool 调用后完成，事件序列逐条相等；截断轮不执行任何 tool、每个 call 一条错误结果，并且下一个请求的投影包含这些结果、loop 继续到完成；混合 terminal / 普通结果时继续；每次请求前 "messages == 投影" 断言生效（故意破坏时失败）；带 usage 的失败调用（`Truncated` 等）计入合计，`CallFailed` 的 usage 记 `None`、不估算；请求里的 system 和 tools 等于 `run_started` 的快照；非法事件被拒绝且 log 不变；未知的事件词汇表版本被拒绝；每次 run 以 `run_started` 开头；模型回复拿到了但 `append` 失败时 run 失败、log 不变（用会失败的 store 注入） |
 | S2 | tool 注册与 `@tool`、参数校验、结果截断、`Budget`、`Gate`、暂停 / 恢复（进程内）、auto-continue（规则 3）、steering 接口、外部执行的 tool、模型失败与 `fallback_role`（规则 9–11） | 超预算在调用前停；`Deny` 变成错误结果；`PauseFor` 后 `outcome=paused`，`resume` 后继续且已有结果的 call 不重复执行；auto-continue 至多 N 次；external tool 往返；`CallFailed` 时没配 fallback 则 `failed` 且 `resume` 重发这一轮、不重跑 tool；配了则事件序列是 `model_error` → `model_switched` → `model_turn`（provenance 是 fallback），之后各轮都用 fallback；fallback 也失败则 `failed`；`Truncated` 不触发切换；交给 lite-model 的 messages 等于投影（专有内容的丢弃在 P0 测）；`CallFailed`（usage 为 `None`）与带 usage 的错误混在一起时合计正确；故障注入：tool 执行后、写结果前崩溃——幂等 tool 用同一个 `call_id` 重跑，非幂等 tool 以 `reason=reconcile` 暂停且此时不写 `tool_result`；在 `model_error` 后、`model_switched` 后各崩溃一次，恢复都用主 role；参数不合法时 tool 没被调用（`executed=False`、没有 `tool_started`）；tool 超时是 `error_kind=timeout`，同一个 `call_id` 不再执行；切换后暂停再恢复，下一次调用用主 role；预算按 session 合计（暂停再恢复不重置 turn）；`reconcile` 暂停后提交的结果以 `origin=reconciled` 写入且该 call 只有一条结果；外部 tool 重复提交被拒；换了 tool 定义的 `Agent` 恢复时，新的 `run_started` 记下新定义，且那之前的 `Opaque` 不再进投影（system / tools 没变的 `resume` 则保留） |
-| S3 | context：skills 索引 + `load_skill`、`Compactor` 默认实现（§6）、`Memory` Protocol（测试用内存实现） | 压缩后原事件仍在 log 里，投影用摘要替代该区间，换一个 compactor 重新投影得到不同结果而 log 不变；切点不拆开 tool call 和结果；skills 索引超预算报错；fork 之后父 session 再压缩，子 session 的投影不变；压缩之前的 `Opaque` 不在投影里，之后产生的在；同一轮的多个 `tool_result` 投影成一个 `ToolResults` |
+| S3 | context：skills 索引 + `load_skill`、`Compactor` 默认实现（§6）、`Memory` Protocol（测试用内存实现） | 压缩后原事件仍在 log 里，投影用摘要替代该区间；投影只由 log 决定：去掉 `compaction` 事件就是完整的历史，换一条摘要或区间不同的 `compaction` 事件就得到不同的请求（2026-11-21 改写：原文"换一个 compactor 重新投影"不成立——摘要和区间存在事件里，compactor 不参与投影）；切点不拆开 tool call 和结果；skills 索引超预算报错；fork 之后父 session 再压缩，子 session 的投影不变；压缩之前的 `Opaque` 不在投影里，之后产生的在；同一轮的多个 `tool_result` 投影成一个 `ToolResults` |
 | S4 | `PgSessionStore`（migrations，`LITEAGENT_TEST_DATABASE_URL`，schema `lite_agent_test`）、跨进程 resume / fork、`expected_seq` 冲突、CLI | 进程 A 暂停、进程 B 恢复；内存 store 产生的 session 导入 PG store 后能恢复（KB §10.3）；fork 不复制事件且互不影响；并发 append 一个成功一个被拒；一批事件的 append 全有或全无；fork 的 fork 里做一次覆盖区间跨过两个 fork 点的压缩，三层 session 各自的投影都符合预期 |
 | S5 | lite-eval target；一个固定的小任务集，每个任务有写明的完成条件（由代码判定）；`-m ollama` 冒烟只跑其中一个用到 tool 的任务 | 指标（完成率、turn、token、无效 tool call）进报告；用 Fake 的确定性跑法进 CI；Ollama 的基线数字记入 KB |
 | S5.5 | 发布 v0.1.0 release wheel | 新项目能从 wheel 安装并跑通 README 的例子 |
@@ -729,6 +742,36 @@ docs/lite-agent-design.md
     否决——"符号链接可以读到根目录之外"（宿主自己的目录）；"恢复被打断的 `load_skill` 时 skill 可能已经变了"
     （它读的是现在的内容，这就是按需加载的意思）；"稳定性测试比的是一个空目录"（两个 agent 用的是同一个目录）。
     补测试——被打断的 `remember` 等人核对、不重跑。
+- **S3b（2026-11-21）**：`compaction.py`（`Compactor`、`SummaryCompactor`、`estimate_tokens`、`render`）、事件
+  `compaction`、`model_error.purpose`、`projection.history()`（投影里的遮盖和 `Opaque` 规则的另一半）、
+  `budget.spent()` 计入摘要调用、`loop._Run.compact()`、`Agent.compaction` / `compact_role`。测试先写
+  （`tests/unit/test_compaction.py`、`test_projection.py` 的两条）；其中三条的剧本排错了（不是实现的问题），改正
+  后另做逐行破坏：22 处里 20 处变红，剩下 2 处（已被覆盖的轮次不再算数、tool 定义计入估算）补了测试后变红。
+  - 真实模型：**没跑成**。准备用本机 Ollama 跑一个多轮 session 验证摘要能保住前面的事实，但那时 Ollama 已经
+    不在运行（端口上没有进程），所有调用都是 `CallFailed`；按规矩没有自己启动它。S3a 那次真实运行不涉及压缩。
+  - 规则 → 测试：遮盖而不改写 `test_compaction_writes_one_event_and_the_projection_shows_the_summary_instead`、
+    `test_every_covered_event_is_still_in_the_log`、`test_the_summary_text_in_the_event_is_what_the_model_is_shown`；
+    后一次吃进前一次 `test_a_later_compaction_takes_in_the_earlier_summary`、`test_only_the_latest_compaction_counts`；
+    切点 `test_a_turn_and_its_tool_results_are_never_split`、
+    `test_nothing_is_cut_while_there_are_no_more_turns_than_it_keeps`、
+    `test_turns_a_summary_already_covers_do_not_count_towards_the_next_cut`；阈值
+    `test_compaction_waits_until_the_estimate_passes_the_roles_threshold`、`test_the_threshold_is_the_role_being_called`、
+    `test_every_role_the_agent_may_call_needs_a_threshold`；预算
+    `test_a_compaction_call_counts_tokens_and_cost_but_not_a_turn`、`test_the_token_budget_includes_what_compaction_spent`；
+    失败 `test_a_failed_compaction_fails_the_run_and_does_not_switch_models`；`Opaque`
+    `test_a_compaction_shows_its_summary_in_place_of_what_it_covers`；fork
+    `test_a_parents_later_compaction_does_not_change_a_fork`、`test_a_fork_can_compact_across_the_point_it_forked_at`。
+  - `/simplify`（一路，四个角度）：采纳——失败的模型调用在一处记账（`_Run.failure()`，主调用和摘要调用共用）；
+    tool 参数的文本化只写一遍（`render` 原来会把从没解析成功的参数写成字面量 `None`）；"哪一条压缩算数"只定义
+    一次（`projection.latest_compaction()`）；摘要之后再查一次预算（回归测试先红）；测试不再伸手改 lite-model
+    fake 的私有属性。留到 S5——`Compactor` 的四个方法其实是两件事（何时切、怎么问），等有第二个实现再定；
+    `covers` 的下界现在总是同一个 seq，链式区间等有测量再考虑；估算可以用实际的 `usage.input` 校准。
+  - Codex 只读 review：1 High、3 Medium、1 Low。修复（回归测试先红）——被输出上限截断的摘要被当成完整摘要
+    用了；`render` 把一轮里的文字全排在 tool 调用前面，打乱了先后。改写——S3 的验收里"换一个 compactor 重新
+    投影"那一条（见 §15 的表）；一条恒真的断言换成了真正的检查。否决——"摘要调用成功但 `compaction` 事件没写
+    进去时，这次花费不在 log 里"（High）：属实，但和普通轮次"回复拿到了、`append` 失败"是同一个已写明的取舍
+    （§4：回复丢掉，钱已经花了，log 里没有）；要补上得在每次模型调用之前先写一条"意图"事件，那是另一个量级
+    的改动，记在 §16。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 
@@ -747,6 +790,9 @@ docs/lite-agent-design.md
   锁；要不要加一个 JSONL 文件 store 给单机脚本用。
 - **过大的 tool 结果**：只截断，还是把完整结果另存一份（blob 表 / 文件）并在事件里留引用。
 - **tool 并行**：同一轮多个 call 是否并行执行；并行时结果事件的顺序按 call 顺序写。
+- **花了钱但没进 log 的调用**：模型已回复而 `append` 失败时（普通轮次或摘要），这次调用的 usage 不在 log 里，
+  预算会少算这一笔（§4）。彻底的做法是调用之前先写一条"意图"事件，之后再对上；S7 的 durable runner 需要
+  类似的东西，到时一起定。
 - **投影的开销**：长 session 每一步全量投影；是否按 seq 缓存（KB §9.3 的开放问题，S5 测了再定）。
 - **memory 与 llm-steward**：agent 写 memory 是直接用 lite-mem，还是必须经过 llm-steward 的治理。
 - **HTTP 端口**：提议 8730（8700 lite-rag、8710 lite-mem、8720–8722 lite-eval）；S6 时在 KB
