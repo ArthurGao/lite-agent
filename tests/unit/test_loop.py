@@ -487,7 +487,9 @@ async def test_a_store_that_fails_on_the_first_write_fails_the_run_with_no_sessi
 
 
 class Unreadable(InMemorySessionStore):
-    async def read(self, session_id: str, *, upto_seq: int | None = None) -> Sequence[Event]:
+    async def read(
+        self, session_id: str, *, after_seq: int = 0, upto_seq: int | None = None
+    ) -> Sequence[Event]:
         raise ConnectionError("database is away")
 
 
@@ -540,6 +542,57 @@ class Forgetful(InMemorySessionStore):
     async def append(self, session_id: str, events: Sequence[Event], *, expected_seq: int) -> None:
         kept = [e for e in events if not isinstance(e, ToolResultEvent)]
         self._events.setdefault(session_id, []).extend(kept)
+
+
+class Counting(InMemorySessionStore):
+    """Notes the range of every read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads: list[tuple[int, int | None]] = []
+
+    async def read(
+        self, session_id: str, *, after_seq: int = 0, upto_seq: int | None = None
+    ) -> Sequence[Event]:
+        self.reads.append((after_seq, upto_seq))
+        return await super().read(session_id, after_seq=after_seq, upto_seq=upto_seq)
+
+
+async def test_before_each_request_only_what_was_written_since_the_last_check_is_read() -> None:
+    # S4: a run reads its session whole once, when it starts; after that, before every request,
+    # only the events it wrote since it last checked (design §4)
+    store = Counting()
+    model = AsyncFakeModel(agent=[call(("c1", "get_time", {})), say("Noon."), say("Again.")])
+    a = agent(model, Recording().tool("get_time", "12:00"), sessions=store)
+    first = await a.run("Time?")
+    # a new session: the first check reads from the start, the next only what came after seq 3
+    assert store.reads == [(0, None), (3, None)]
+    store.reads.clear()
+
+    await a.run("And now?", session_id=first.session_id)
+
+    # the session whole when the run starts (8 events), then only what this run wrote after it
+    assert store.reads == [(0, None), (8, None)]
+
+
+class Rewriting(InMemorySessionStore):
+    """Hands back a changed copy of the last event written."""
+
+    async def read(
+        self, session_id: str, *, after_seq: int = 0, upto_seq: int | None = None
+    ) -> Sequence[Event]:
+        got = list(await super().read(session_id, after_seq=after_seq, upto_seq=upto_seq))
+        if after_seq and got and isinstance(got[-1], ToolResultEvent):
+            got[-1] = got[-1].model_copy(update={"content": "something else"})
+        return got
+
+
+async def test_a_store_that_changed_an_event_since_it_was_written_stops_the_run() -> None:
+    model = AsyncFakeModel(agent=[call(("c1", "get_time", {})), say("Noon.")])
+    a = agent(model, Recording().tool("get_time", "12:00"), sessions=Rewriting())
+    result = await a.run("Time?")
+    assert result.error == RunError("harness", "HarnessError")
+    assert len(model.turn_calls) == 1
 
 
 async def test_a_store_that_lost_an_event_stops_the_run_before_the_next_request() -> None:

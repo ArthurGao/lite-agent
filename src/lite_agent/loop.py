@@ -71,15 +71,16 @@ class _Run:
         self.session_id = session_id
         self.run_id = run_id
         self.log: list[Event] = []  # what this run believes the session holds
+        self.checked = 0  # the last seq the store was seen to hold exactly as this run does
         self.opened = 0  # the seq of this run's run_started: what follows it is this run's
         self.usage = Usage()
 
     # --- the store: the only two places it is touched ---
 
-    async def read(self) -> list[Event]:
+    async def read(self, after_seq: int = 0) -> list[Event]:
         """UnknownSession is the caller's error and passes; any other failure is the store's."""
         try:
-            return list(await self.agent.sessions.read(self.session_id))
+            return list(await self.agent.sessions.read(self.session_id, after_seq=after_seq))
         except UnknownSession:
             raise
         except Exception as exc:
@@ -110,12 +111,16 @@ class _Run:
     # --- what is derived from the log ---
 
     async def projection(self) -> Projection:
-        """The next request, and the invariant that guards it: what the store holds projects to
-        exactly what this run built (§4). A store that lost or changed an event stops here."""
-        built = derive(self.log)
-        if derive(await self.read()) != built:
-            raise HarnessError("the stored log does not project to the request this run built")
-        return built
+        """The next request, and the invariant that guards it (§4): the store holds exactly the
+        events this run wrote since it last checked, so the request is the projection of what
+        the store holds. Only that tail is read; what was checked before cannot change, since
+        stores never rewrite (the PostgreSQL store refuses it in the database). A store that
+        lost or changed an event stops the run here."""
+        mine = [e for e in self.log if e.seq > self.checked]
+        if await self.read(after_seq=self.checked) != mine:
+            raise HarnessError("the store does not hold the events this run wrote")
+        self.checked = self.log[-1].seq if self.log else 0
+        return derive(self.log)
 
     # What a run has done is read from the log: the events after its own `run_started`. A run
     # resumed elsewhere therefore starts clean, on the primary role and with its own
@@ -547,6 +552,7 @@ async def run_loop(agent: "Agent", session_id: str | None, input: str | Resume) 
             opening.insert(0, SessionStarted)
         else:
             run.log = await run.read()
+            run.checked = run.log[-1].seq if run.log else 0  # read whole: all of it is checked
         open_calls = unanswered_calls(run.log)
         if given is not None:
             _check_resume(run.log, given)

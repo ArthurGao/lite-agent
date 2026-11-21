@@ -1,6 +1,6 @@
 # lite-agent
 
-**Status: S3** (stage plan: design §15). The core runs: a tool loop over a
+**Status: S4a** (stage plan: design §15). The core runs: a tool loop over a
 [lite-model](https://github.com/ArthurGao/lite-model) role, every step recorded in an append-only
 event log, and each request derived from that log. Tool arguments are validated, results are cut to
 a budget, and turn, token and cost budgets stop a session. Gates can refuse a call or stop for a person's
@@ -10,7 +10,8 @@ the model, and a fallback role takes over, visibly and once per run, when a mode
 Skills (a directory of `SKILL.md` files) are indexed in the system prompt and loaded on demand,
 and a `Memory` gives the model `recall` and `remember`. A long history is summarised before it
 outgrows the model: the summary is one more event that says what it covers, and nothing is rewritten.
-Sessions live in memory only; a persistent store is the next stage. Not released yet.
+Sessions live in memory by default, or in PostgreSQL with the `pg` extra (`PgSessionStore`, its own
+schema, a log the database refuses to rewrite). Not released yet.
 
 ```python
 import asyncio

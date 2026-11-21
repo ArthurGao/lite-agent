@@ -144,8 +144,9 @@ class Resume:                   # S2b: what the host brings back
 
 class SessionStore(Protocol):
     async def append(self, session_id: str, events: Sequence[Event], *, expected_seq: int) -> None: ...
-    async def read(self, session_id: str, *, upto_seq: int | None = None) -> Sequence[Event]: ...
+    async def read(self, session_id: str, *, after_seq: int = 0, upto_seq: int | None = None) -> Sequence[Event]: ...  # S4a: after_seq
     async def fork(self, session_id: str, *, at_seq: int) -> str: ...
+# implementations: InMemorySessionStore; PgSessionStore (S4a, extra `pg`)
 
 class Tool(Protocol):                           # the attributes are read-only properties
     name: str
@@ -211,7 +212,7 @@ class Runner(Protocol):                         # where the loop's steps execute
 
 | type | data | 模型可见 |
 | --- | --- | --- |
-| `session_started` | session 的第一条事件；它的 `run_id` 是开这个 session 的那次 run。fork 的血缘怎么表示（事件还是 store 的元数据）在 S4 定，S1 的内存 store 记在元数据里 | 否 |
+| `session_started` | session 的第一条事件；它的 `run_id` 是开这个 session 的那次 run。fork 的血缘不是事件，是 store 的元数据（父 session、fork 点；S4a 定，两种 store 一样） | 否 |
 | `run_started` | `run_id`、触发方式（run / resume）、**本次 run 的快照**：主 role、`fallback_role`、system prompt 原文、每个 tool 的完整定义（名字、描述、JSON schema） | system 和 tools |
 | `user_message` | 文本；`origin`：task（S1）；steering / follow_up / auto_continue / resume 在 S2 加 | 是 |
 | `model_turn` | lite-model 的 `AssistantTurn.blocks`，按端点给的顺序原样保存（`Text`、`ToolCall`、`Opaque`——Anthropic 的 thinking block）；`stop`、role、provenance、usage | 是 |
@@ -240,9 +241,12 @@ class Runner(Protocol):                         # where the loop's steps execute
   永远不会发出失效的 block。
 - **system 和 tools 也来自 log**：投影取最近一条 `run_started` 的快照。一次 run 之内它们不变；宿主换了
   `Agent` 的配置再 `resume`，新的 `run_started` 记下新的快照，回放时每个请求都能按它所属的 run 还原。
-- **不变量**：每次真实请求前断言 "交给 lite-model 的 messages 和 tools == log 的投影"，不等就失败。实现：
-  loop 手里有一份自己追加过的事件，请求由它投影得出；发之前从 store 重新读一遍并投影，两者必须相等，否则
-  `HarnessError`、不发请求（store 丢了或改了事件时在这里被抓住）。它比较的是规范表示；后端实际发出的请求体由 lite-model 的契约测试保证。
+- **不变量**：每次真实请求前断言 "交给 lite-model 的 messages 和 tools == log 的投影"，不等就失败。实现（S4a）：
+  loop 手里有一份自己追加过的事件，请求由它投影得出。run 开始时把 session 整个读一遍；之后每次请求之前，只读
+  "上次核对之后"的那一段，要求与自己写的逐条相等，否则 `HarnessError`、不发请求（store 丢了或改了刚写的事件
+  时在这里被抓住）。已经核对过的前缀不再重读：这依赖 store 从不改写——PostgreSQL 那边由数据库保证（`events`
+  表上的触发器拒绝 `UPDATE`、`DELETE`、`TRUNCATE`），自己实现 store 的宿主要做到同样的事。S1 到 S3 是每步全量
+  读、比较两次投影；换成 PostgreSQL 后每步一次整 session 的读取代价太高。它比较的是规范表示；后端实际发出的请求体由 lite-model 的契约测试保证。
 - **压缩只做遮盖**：`compaction` 事件记下它覆盖哪些 seq，原事件留在 log 里；投影时用摘要替代那个区间。
 - **fork**：新 session 记 `(parent_session_id, at_seq)`，不复制事件。读子 session = 父 session 里
   `seq ≤ at_seq` 的事件，接上子 session 自己的事件；子 session 的 seq 从 `at_seq + 1` 起，存在自己名下。
@@ -529,7 +533,8 @@ src/lite_agent/
   context/        skills.py, memory.py, compaction.py
   config.py       Settings (LITEAGENT_), startup validation
   cli.py          liteagent run | sessions | show | resume | fork | config
-  pg/             PgSessionStore, migrations/            (extra: pg)
+  config.py       Settings (LITEAGENT_DATABASE_URL, LITEAGENT_SCHEMA)
+  pg/             PgSessionStore, db.py (migrations, vendored), migrations/  (extra: pg)
   mcp.py                                                 (extra: mcp)
   adapters/       lite_mem.py, lite_rag.py               (extras: mem, rag)
   temporal/       workflow.py, activities.py             (extra: temporal, S7)
@@ -800,10 +805,49 @@ docs/lite-agent-design.md
     一部分是摘要保住了事实而主模型没用上；3 次的样本说明不了更多，留给 S5 的评测。修复后摘要 6/6 抄回了标题行，
     所以改成在库里去掉（`fix/compaction-prompt`）。Codex 只读 review：2 条，都采纳——标题的大小写、多余空格、
     `\r`、缩进都要认（回归测试先红）；空摘要的测试补上用量和不切换的断言（破坏用量记录确认它会失败）。
+- **S4a（2026-11-21）**：`PgSessionStore`（extra `pg`，`psycopg[binary,pool]==3.3.8`，与兄弟模块相同）、迁移
+  `0001_initial.sql`（`sessions` 带 fork 的血缘、`events` 只追加）、迁移运行器（vendor 自 lite-cache `db.py` @
+  6afa032）、`config.Settings`、`SessionStore.read(after_seq=…)`、不变量检查只读尾部（§4）。测试先写；一套契约测试
+  同时跑两种 store（`tests/contract/test_store_contract.py`），loop 的关键路径（tool、暂停、恢复、压缩、fork、预算、
+  store 丢事件）也在两种 store 上各跑一遍（`test_loop_on_stores.py`）。本机建了库和角色 `lite_agent`，口令只在
+  gitignored 的 `.env`；CI 加了 PostgreSQL 服务。没有 `LITEAGENT_TEST_DATABASE_URL` 时 PG 测试报错，不跳过。
+  - 与 plan 的出入：内存 store 的空批次原来会凭空建一个空 session，改成什么都不写（两种 store 一致，契约测试
+    覆盖）；socket 守卫对请求了测试数据库的测试放行，其它测试照旧不能联网。
+  - 规则 → 测试：原子批次 `test_a_batch_with_one_bad_event_is_refused_whole[postgres]`；并发
+    `test_two_writers_at_the_same_tail_one_wins_one_is_refused`、`test_two_writers_creating_one_session_one_wins`；只追加
+    `test_the_database_refuses_to_rewrite_events`；fork `test_a_fork_reads_the_parents_prefix_and_then_its_own_events`、
+    `test_a_fork_of_a_fork_reads_along_the_chain`、`test_a_fork_of_a_fork_taken_below_the_first_fork_point`；读回时校验
+    `test_an_event_this_code_cannot_vouch_for_is_refused_when_read`；尾部检查
+    `test_before_each_request_only_what_was_written_since_the_last_check_is_read`、
+    `test_a_store_that_changed_an_event_since_it_was_written_stops_the_run`（两条在旧的全量检查下都会失败）。
+  - 收尾 `/simplify`：采纳——schema 名用 `TypeAdapter(OwnSchema)` 校验（不再为此构造一个读 `.env` 的 `Settings`）；
+    SQL 在构造时组好一次；锁行和取尾部合成一条查询；`read` 跳过整段都在 `after_seq` 之前的祖先；`connection_error`
+    接受任何异常；删掉没人用的 `kind` fixture。它顺带发现 `read(upto_seq=0)` 在 PG store 读出全部（真值判断），
+    先写契约测试 `test_reading_up_to_seq_zero_reads_nothing` 见红再修。记下不做：一条递归 CTE 读整条血缘、
+    `projection` 里用下标代替过滤（留给 S5 的测量）；错误信息里的 `liteagent migrate` 改为 `lite_agent.pg.migrate`，
+    S4b 有了 CLI 再改回。
+  - **S4b 要先定的事（simplify 提出）**：继承来的事件保留原 session 的 `session_id`，`fork()` 的新 id 由 store 生成；
+    所以 `copy_session` 只能把一个 fork 摊平成独立 session（事件改写 `session_id`），不能在目标 store 里重建血缘。
+    S4b 的 plan 里写明。
+  - 收尾 Codex（只读）：采纳——`close()` 之后每个调用都报 `StoreError`、不再重开
+    （`test_a_closed_store_says_so_and_does_not_reopen`）；打开连接池和探测表的整个过程都只给出脱敏后的错误；
+    `redact_conninfo` 隐去所有 `*password*` 参数（`sslpassword` 原来会原样显示，
+    `test_every_secret_in_a_connection_string_is_hidden`）；未迁移 schema 的测试在 `finally` 里关池；空批次的契约
+    补上 `expected_seq` 非 0 和过期的情形（两种 store 原本就对，临时去掉内存 store 的检查见红）。否决：
+    - "`migrate` 信任 schema 里已有的 `schema_migrations`"：schema 是 lite-agent 自己的（`own_schema` 拒绝共享和系统
+      schema），别的工具在里面建了同名表属于配置错误；打开 store 时还会检查 `events` 表在不在。
+    - "`pending()` 不报未知版本"：与 lite-cache、lite-rag 的 vendor 原件一致，改它要三处一起改；记进 §16。
+    - "`read` 跨段没有一致的快照"：祖先段都封顶在 fork 点，事件只追加，那一段不会再变；只有最后一段（自己的）
+      会增长，并发写入只会让结果多出一个完整的批次（批次是原子的），返回的总是某个时刻的完整前缀。
+    - "socket 守卫放行范围太宽"：放行的只是请求了测试数据库 fixture 的测试，URL 只来自显式设置的
+      `LITEAGENT_TEST_DATABASE_URL`；这是测试代码，不是生产路径。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 
 ## 16. 待确认
+
+- **迁移运行器不认识的版本**（S4a Codex）：`pending()` 对 `schema_migrations` 里出现、包里却没有的版本
+  （更新的代码迁移过的库）不报错。三个仓库共用这份代码，要改一起改。
 
 - **【阻塞 S1 之后的取舍】第一个真实任务是什么。** 现在 workspace 里没有需要"模型自选 tool"的宿主（cairn
   等现有项目都明确不做 model-driven tool loop，llm-steward 是治理层）。没有真实任务，S3 做哪些 tool、
@@ -814,8 +858,7 @@ docs/lite-agent-design.md
 - **preserved thinking 的 400 与别的失败分不开**：投影规则（§4）应当让它不发生；真发生了是 `CallFailed`，
   会触发 `fallback_role`。要不要让 lite-model 给它一个单独的错误类型，S2 做 fallback 时定。
 - **streaming**：v1 事件粒度是一轮。交互式 UI 需要逐 token 时，要 lite-model 先支持 streaming。
-- **session store 的默认持久化**：提议 PostgreSQL（workspace 惯例，每个项目一个库）。cairn 用文件 +
-  锁；要不要加一个 JSONL 文件 store 给单机脚本用。
+- ~~**session store 的默认持久化**~~：S4a 做了 PostgreSQL（`PgSessionStore`）。文件 store 仍在"按需"里。
 - **过大的 tool 结果**：只截断，还是把完整结果另存一份（blob 表 / 文件）并在事件里留引用。
 - **tool 并行**：同一轮多个 call 是否并行执行；并行时结果事件的顺序按 call 顺序写。
 - **花了钱但没进 log 的调用**：模型已回复而 `append` 失败时（普通轮次或摘要），这次调用的 usage 不在 log 里，

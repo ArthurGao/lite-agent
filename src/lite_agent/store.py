@@ -15,8 +15,11 @@ class SessionStore(Protocol):
         tail (0 for a new session); a different tail raises SeqConflict."""
         ...
 
-    async def read(self, session_id: str, *, upto_seq: int | None = None) -> Sequence[Event]:
-        """The session's events in order, inherited ones first; UnknownSession if there is none."""
+    async def read(
+        self, session_id: str, *, after_seq: int = 0, upto_seq: int | None = None
+    ) -> Sequence[Event]:
+        """The session's events in order, inherited ones first, with seqs in (after_seq, upto_seq];
+        UnknownSession if there is none."""
         ...
 
     async def fork(self, session_id: str, *, at_seq: int) -> str:
@@ -65,16 +68,19 @@ class InMemorySessionStore:
         if expected_seq != tail:
             raise SeqConflict(f"session {session_id}: expected seq {expected_seq}, tail is {tail}")
         check_batch(session_id, events, tail=tail)  # before anything is stored: whole or not at all
-        self._events.setdefault(session_id, []).extend(events)
+        if events:  # a session is created by its first batch, never by an empty one
+            self._events.setdefault(session_id, []).extend(events)
 
-    async def read(self, session_id: str, *, upto_seq: int | None = None) -> Sequence[Event]:
+    async def read(
+        self, session_id: str, *, after_seq: int = 0, upto_seq: int | None = None
+    ) -> Sequence[Event]:
         self._known(session_id)
         events: list[Event] = []
         if session_id in self._parents:  # the prefix never changes: a parent only appends
             parent, at_seq = self._parents[session_id]
             events += await self.read(parent, upto_seq=at_seq)
         events += self._events.get(session_id, [])
-        return [e for e in events if upto_seq is None or e.seq <= upto_seq]
+        return [e for e in events if e.seq > after_seq and (upto_seq is None or e.seq <= upto_seq)]
 
     async def fork(self, session_id: str, *, at_seq: int) -> str:
         self._known(session_id)
