@@ -1,6 +1,6 @@
 # lite-agent 设计文档
 
-**状态：S1 完成（2026-11-21）：事件、内存 store、投影、loop、`Agent.run`。P0 是 lite-model v0.4.0 的 `turn()`。仓库 2026-11-21 起公开在 github.com/ArthurGao/lite-agent。下一步 S2。**
+**状态：S1–S7 完成（2026-11-21）：事件与投影、tool loop、`@tool`、预算、gate、暂停 / 恢复、`fallback_role`、skills、memory、压缩、PG session store、CLI、lite-eval target（S5）、HTTP 壳（S6）、Temporal runner 与 inbox / timer（S7）。v0.1.0（S5.5，事件词汇表 V=1 冻结）与 v0.2.0 已发布。P0 是 lite-model v0.4.0 的 `turn()`。仓库公开在 github.com/ArthurGao/lite-agent。第一个宿主：llm-steward 的 reconcile 排查助手（2026-11-21 owner 定，§16）。**
 与代码冲突时，在同一次改动里更新本文，并在 commit 里说明原因。
 
 ## 0. 决策记录
@@ -641,8 +641,8 @@ docs/lite-agent-design.md
 | S4 | `PgSessionStore`（migrations，`LITEAGENT_TEST_DATABASE_URL`，schema `lite_agent_test`）、跨进程 resume / fork、`expected_seq` 冲突、CLI | 进程 A 暂停、进程 B 恢复；内存 store 产生的 session 导入 PG store 后能恢复（KB §10.3）；fork 不复制事件且互不影响；并发 append 一个成功一个被拒；一批事件的 append 全有或全无；fork 的 fork 里做一次覆盖区间跨过两个 fork 点的压缩，三层 session 各自的投影都符合预期 |
 | S5 | lite-eval target；一个固定的小任务集，每个任务有写明的完成条件（由代码判定）；`-m ollama` 冒烟只跑其中一个用到 tool 的任务 | 指标（完成率、turn、token、无效 tool call）进报告；用 Fake 的确定性跑法进 CI；Ollama 的基线数字记入 KB |
 | S5.5 | 发布 v0.1.0 release wheel | 新项目能从 wheel 安装并跑通 README 的例子 |
-| S6（按需） | HTTP 壳（§10）；先定 §10 末尾列的协议 | 有一个 TypeScript 宿主要用时再做 |
-| S7（按需） | `TemporalRunner`、inbox / timer（§9）；先把 §9 写成完整设计 | 有一个真实的 long-running 任务时再做；replay 测试、activity 重试不重复写事件、Retry-After、Continue-As-New |
+| S6（完成，v0.2.0） | HTTP 壳（§10）；先定 §10 末尾列的协议 | 原定"有一个 TypeScript 宿主要用时再做"，2026-11-21 先于宿主完成 |
+| S7（完成，v0.2.0） | `TemporalRunner`、inbox / timer（§9）；先把 §9 写成完整设计 | 原定"有一个真实的 long-running 任务时再做"，2026-11-21 先于宿主完成；replay 测试、activity 重试不重复写事件、Retry-After、Continue-As-New |
 | 按需（各自有宿主要用时） | MCP client（extra `mcp`，用进程内假 server 测）、lite-mem adapter、lite-rag tool | — |
 | 按需 | streaming、tool 并行、follow-up 队列、subagent、文件型 session store、运行时注册表 | — |
 
@@ -1118,9 +1118,10 @@ docs/lite-agent-design.md
 - **迁移运行器不认识的版本**（S4a Codex）：`pending()` 对 `schema_migrations` 里出现、包里却没有的版本
   （更新的代码迁移过的库）不报错。三个仓库共用这份代码，要改一起改。
 
-- **【阻塞 S1 之后的取舍】第一个真实任务是什么。** 现在 workspace 里没有需要"模型自选 tool"的宿主（cairn
-  等现有项目都明确不做 model-driven tool loop，llm-steward 是治理层）。没有真实任务，S3 做哪些 tool、
-  S5 的评测集、S7 做不做都只能猜。S0–S2 不依赖这个答案。
+- ~~**【阻塞 S1 之后的取舍】第一个真实任务是什么**~~：2026-11-21 owner 定：llm-steward 的 **reconcile 排查
+  助手**。对账发现孤儿 provider 记录后，agent 用只读 tool 查 change_log / external_refs / provider 记录，写出
+  诊断和建议动作（ignore / remirror / erase），交给人在 Admin 里决定；它自己不写任何受治理的状态。设计在
+  llm-steward 设计 §11 的 P11。这个宿主只用核心库和 `pg` extra，不用 HTTP 壳和 Temporal。
 - ~~**【阻塞 P0】lite-model 的 tool 调用接口**~~：2026-11-21 定并实现（lite-model 设计 §3.1）。
 - **OpenAI 兼容后端的 reasoning 内容**：lite-model 0.4.0 不采集、不回传（它的 §15）。S5b 在 Ollama 上核实：
   qwen3:8b 开 thinking（`reasoning_effort: medium`）、推理内容不回传，任务集完成率 0.889，高于关 thinking 的
