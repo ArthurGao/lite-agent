@@ -169,3 +169,29 @@ def test_migrate_never_shows_the_password_whatever_fails(monkeypatch: pytest.Mon
     assert shown.exit_code == 1
     assert password not in shown.stderr + shown.stdout + repr(shown.exception)
     assert shown.stderr.startswith("error: ")
+
+
+def test_ids_and_errors_are_escaped_too(env: str, pg_schema: str) -> None:
+    # security review 2026-11-21: a session id is the host's string; `sessions` and every
+    # error line print it, so they escape it as `show` does
+    bad = "s\x1b]0;owned\x07\x9b2J"
+
+    async def seed() -> None:
+        store = PgSessionStore(env, schema=TEST_SCHEMA)
+        ids = iter([bad, "r1"])
+        a = Agent(
+            role="agent",
+            model=AsyncFakeModel(agent=[say("Done.")]),
+            sessions=store,
+            ids=lambda: next(ids),
+        )
+        await a.run("Hi.")
+        await store.close()
+
+    asyncio.run(seed())
+    listed = runner.invoke(app, ["sessions"])
+    missing = runner.invoke(app, ["show", "nowhere\x1b[2J"])
+    for out in (listed.output, missing.stderr):
+        assert "\x1b" not in out and "\x07" not in out and "\x9b" not in out
+    assert listed.output.splitlines()[1].startswith("s\\x1b]0;owned\\x07\\x9b2J")
+    assert missing.stderr == "error: no session nowhere\\x1b[2J\n"
