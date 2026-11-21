@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from lite_model import Message, ToolCall, ToolResult, ToolResults, ToolSpec, TurnMessage
 
 from lite_agent.events import (
+    Compaction,
     Event,
     ModelTurn,
     Paused,
@@ -28,8 +29,9 @@ class Projection:
 
 def _opaque_from(events: Sequence[Event]) -> int:
     """The seq from which opaque blocks may be replayed. A thinking block is bound to the system
-    prompt and tools it was produced under (design §4): once a run starts with a different
-    snapshot, earlier ones would be rejected, so they are left out."""
+    prompt, the tools and the messages it was produced after (design §4): once a run starts with
+    a different snapshot, or the history before it is replaced by a summary, earlier ones would
+    be rejected, so they are left out."""
     boundary, previous = 0, None
     for e in events:
         if isinstance(e, RunStarted):
@@ -37,6 +39,8 @@ def _opaque_from(events: Sequence[Event]) -> int:
             if previous is not None and snapshot != previous:
                 boundary = e.seq
             previous = snapshot
+        elif isinstance(e, Compaction):
+            boundary = e.seq
     return boundary
 
 
@@ -85,37 +89,52 @@ def unanswered_calls(events: Sequence[Event]) -> tuple[str, ...]:
     return turn.unanswered if turn is not None else ()
 
 
-def derive(events: Sequence[Event]) -> Projection:
-    """The request a run would send next: the latest run's system prompt and tools, and the
-    history. Every result of one turn's calls becomes one `ToolResults`, in the calls' order."""
+def latest_compaction(events: Sequence[Event]) -> Compaction | None:
+    """The one compaction that counts: each covers the history from its start, the earlier
+    summary included, so the latest stands for everything before its upper bound."""
+    return next((e for e in reversed(events) if isinstance(e, Compaction)), None)
+
+
+def history(events: Sequence[Event]) -> tuple[TurnMessage, ...]:
+    """The conversation as the model is shown it, without the system prompt. The latest
+    compaction's summary stands for every event it covers (a later compaction takes in an
+    earlier one's summary, so only the latest counts); every result of one turn's calls becomes
+    one `ToolResults`, in the calls' order."""
     opaque_from = _opaque_from(events)
-    snapshot: RunStarted | None = None
-    history: list[TurnMessage] = []
+    summary = latest_compaction(events)
+    covered = summary.covers[1] if summary is not None else 0
+    shown: list[TurnMessage] = [Message("user", summary.summary)] if summary is not None else []
     calls: list[str] = []  # the open turn's call ids, in order
     results: dict[str, ToolResult] = {}
 
     def close_turn() -> None:
         if results:
-            history.append(ToolResults(tuple(results[c] for c in calls if c in results)))
+            shown.append(ToolResults(tuple(results[c] for c in calls if c in results)))
         calls.clear()
         results.clear()
 
     for e in events:
-        if isinstance(e, RunStarted):
-            snapshot = e
-        elif isinstance(e, UserMessage):
+        if e.seq <= covered:
+            continue
+        if isinstance(e, UserMessage):
             close_turn()
-            history.append(Message("user", e.text))
+            shown.append(Message("user", e.text))
         elif isinstance(e, ModelTurn):
             close_turn()
-            history.append(turn_of(e.blocks, opaque=e.seq >= opaque_from))
+            shown.append(turn_of(e.blocks, opaque=e.seq >= opaque_from))
             calls += [b.id for b in e.blocks if isinstance(b, ToolCallBlock)]
         elif isinstance(e, ToolResultEvent):
             results[e.call_id] = ToolResult(e.call_id, e.content, e.is_error)
     close_turn()
+    return tuple(shown)
 
+
+def derive(events: Sequence[Event]) -> Projection:
+    """The request a run would send next: the latest run's system prompt and tools, and the
+    history."""
+    snapshot = next((e for e in reversed(events) if isinstance(e, RunStarted)), None)
     if snapshot is None:
-        return Projection(tuple(history), ())
+        return Projection(history(events), ())
     system = [Message("system", snapshot.system)] if snapshot.system else []
     tools = tuple(ToolSpec(t.name, t.description, t.parameters) for t in snapshot.tools)
-    return Projection((*system, *history), tools)
+    return Projection((*system, *history(events)), tools)

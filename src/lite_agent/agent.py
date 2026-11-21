@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from lite_model import AsyncToolModel
 
 from lite_agent.budget import Budget
+from lite_agent.compaction import Compactor
 from lite_agent.context import Memory, SkillSource, build
 from lite_agent.events import Event
 from lite_agent.gates import Gate
@@ -40,6 +41,10 @@ class Agent:
     # Each adds its tools after the host's (`load_skill`; `recall` and `remember`).
     skills: SkillSource | None = None
     memory: Memory | None = None
+    # What makes a long history smaller before a call, and the lite-model role that writes the
+    # summary (design §6). Without it nothing is summarised.
+    compaction: Compactor | None = None
+    compact_role: str = "compact"
     sessions: SessionStore = field(default_factory=InMemorySessionStore)
     budget: Budget = field(default_factory=Budget)
     runner: Runner = field(default_factory=InProcessRunner)
@@ -63,6 +68,8 @@ class Agent:
         if repeated:
             raise ValueError(f"tool names must be unique: {', '.join(repeated)}")
         object.__setattr__(self, "gates", tuple(self.gates))
+        if self.compaction is not None:
+            self.compaction.check([r for r in (self.role, self.fallback_role) if r is not None])
 
     def system_prompt(self) -> str:
         """The system prompt every run of this agent is opened with: the host's, then what

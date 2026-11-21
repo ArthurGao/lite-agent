@@ -202,7 +202,22 @@ class ModelErrorEvent(_Event):
     type: Literal["model_error"] = "model_error"
     error: str  # the exception's type name; never upstream text
     role: str
+    # turn: a call of the loop.  compact: a call that was to write a summary; it is billed like
+    # any other and is not one of the session's turns (design §5 rule 6).
+    purpose: Literal["turn", "compact"] = "turn"
     usage: UsageData | None  # None: nothing came back, so nothing is known
+
+
+class Compaction(_Event):
+    """A summary that stands for the model-visible events with seqs in `covers`, both ends
+    included. They stay in the log; the projection shows `summary` in their place (design §4)."""
+
+    type: Literal["compaction"] = "compaction"
+    summary: str  # exactly what the model is shown, framing included
+    covers: tuple[int, int]
+    role: str  # the role that wrote it
+    provenance: ProvenanceData
+    usage: UsageData
 
 
 class ModelSwitched(_Event):
@@ -231,6 +246,7 @@ Event = Annotated[
     | Paused
     | Resumed
     | ModelErrorEvent
+    | Compaction
     | ModelSwitched
     | RunFinished,
     Field(discriminator="type"),

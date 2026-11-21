@@ -18,6 +18,7 @@ from lite_model.types import stop_for
 
 from lite_agent import Projection, derive
 from lite_agent.events import (
+    Compaction,
     Event,
     ModelErrorEvent,
     ModelTurn,
@@ -195,6 +196,43 @@ def test_unanswered_calls_are_the_last_turns_calls_without_a_result() -> None:
     assert unanswered_calls(log.events) == ("c2",)
     assert unanswered_calls(log.result("c2", "x").events) == ()
     assert unanswered_calls(Log().started().user("Go.").events) == ()
+
+
+def test_a_compaction_shows_its_summary_in_place_of_what_it_covers() -> None:
+    log = Log().started().user("One.").turn(AssistantTurn((Text("First."),))).user("Two.")
+    log.turn(THOUGHT).result("c9", "12:00")
+    covered_to = 5  # session_started, run_started, "One.", "First.", "Two."
+    log.add(
+        Compaction,
+        summary="SUMMARY",
+        covers=(3, covered_to),
+        role="compact",
+        provenance=WHO,
+        usage=UsageData(),
+    )
+    log.turn(THOUGHT).result("c9", "13:00")
+
+    messages = derive(log.events).messages
+
+    assert messages[:2] == (Message("system", "Be brief."), Message("user", "SUMMARY"))
+    # kept, but produced before the summary replaced what it was thinking about: no opaque block
+    assert messages[2] == AssistantTurn((Text("Noon."), ToolCall("c9", "get_time", {})))
+    assert messages[3] == ToolResults((ToolResult("c9", "12:00"),))
+    assert messages[4] == THOUGHT  # produced after the compaction: replayed whole
+    assert len(messages) == 6
+    assert len(log.events) == 10  # nothing left the log
+
+
+def test_only_the_latest_compaction_counts() -> None:
+    log = Log().started("").user("One.").turn(AssistantTurn((Text("First."),))).user("Two.")
+    log.add(
+        Compaction, summary="OLD", covers=(3, 4), role="compact", provenance=WHO, usage=UsageData()
+    )
+    log.turn(AssistantTurn((Text("Second."),))).user("Three.")
+    log.add(
+        Compaction, summary="NEW", covers=(3, 7), role="compact", provenance=WHO, usage=UsageData()
+    )
+    assert derive(log.events).messages == (Message("user", "NEW"), Message("user", "Three."))
 
 
 def test_derive_is_pure() -> None:

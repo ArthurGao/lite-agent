@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from lite_agent import EventRejected
 from lite_agent.events import (
     EVENT_TYPES,
+    Compaction,
     Event,
     ModelErrorEvent,
     ModelSwitched,
@@ -92,6 +93,15 @@ ONE_OF_EACH: list[Event] = [
     ),
     Resumed(seq=10, approve={"c1": True}, results=("c2",), **ENVELOPE),
     ModelSwitched(seq=11, from_role="agent", to_role="backup", reason="CallFailed", **ENVELOPE),
+    Compaction(
+        seq=12,
+        summary="Earlier: the time was asked.",
+        covers=(3, 9),
+        role="compact",
+        provenance=WHO,
+        usage=UsageData(input=900, output=60),
+        **ENVELOPE,
+    ),
 ]
 
 

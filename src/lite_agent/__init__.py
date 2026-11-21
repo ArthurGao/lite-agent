@@ -2,6 +2,7 @@
 
 from lite_agent.agent import Agent
 from lite_agent.budget import Budget
+from lite_agent.compaction import Compactor, SummaryCompactor
 from lite_agent.context import Memory, NotesMemory, SkillDir, SkillInfo, SkillSource
 from lite_agent.errors import (
     AgentError,
@@ -24,6 +25,7 @@ __all__ = [
     "AgentError",
     "Allow",
     "Budget",
+    "Compactor",
     "Deny",
     "EventRejected",
     "FunctionTool",
@@ -48,6 +50,7 @@ __all__ = [
     "SkillInfo",
     "SkillSource",
     "StoreError",
+    "SummaryCompactor",
     "Tool",
     "ToolContext",
     "ToolOutcome",
