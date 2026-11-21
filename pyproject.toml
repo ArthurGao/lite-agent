@@ -25,15 +25,24 @@ liteagent = "lite_agent.cli:main"
 pg = [
     "psycopg[binary,pool]==3.3.8",
 ]
+# The S5 evaluation runs on lite-eval (design §15), installed from a release wheel in
+# [tool.uv.sources], the version lite-mem and llm-steward pin: an upgrade re-runs
+# tests/integration/test_eval_target.py.
+eval = [
+    "lite-eval",
+]
 
 [dependency-groups]
 dev = [
-    "lite-agent[pg]",  # the PostgreSQL store's tests run in CI
+    "lite-agent[pg,eval]",  # the PostgreSQL store's and the eval target's tests run in CI
     "pytest>=8.3",
     "pytest-asyncio>=1.0",
     "ruff>=0.8",
     "mypy>=1.13",
 ]
+
+[tool.uv.sources]
+lite-eval = { url = "https://github.com/ArthurGao/lite-eval/releases/download/v0.4.1/lite_eval-0.4.1-py3-none-any.whl" }
 
 [build-system]
 requires = ["uv_build>=0.10,<0.11"]
@@ -44,6 +53,11 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# The eval tasks are half Chinese: full-width punctuation is their content, not a typo.
+"src/lite_agent/evals/*" = ["RUF001"]
+"tests/unit/test_eval_tasks.py" = ["RUF001"]
 
 [tool.ruff.format]
 # Code blocks in docs are hand-aligned illustrations, not code.

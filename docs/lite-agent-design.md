@@ -872,6 +872,41 @@ docs/lite-agent-design.md
   - 合并后的自动安全审查（采纳）：`show` 转义了控制字符，`sessions` 的行和每条错误信息（会引用 session id，
     id 由宿主决定）却没有；现在 CLI 打印的每个宿主给的字符串都经过同一个转义
     （`test_ids_and_errors_are_escaped_too`，先见红）。
+- **S5a（2026-11-21）**：评测框架。任务集是合成的（owner 选定；§16 的"第一个真实任务"仍然开着）：一个确定性的
+  小店（`src/lite_agent/evals/world.py`：客户、订单、库存、退款、留言，6 个 tool），12 个任务（7 英 5 中；查询、
+  串联、改状态只改一次、出错后改正、不该调 tool、要读 skill、长任务加压缩、完成条件），每个任务的完成由代码读
+  小店和事件 log 判定（`evals/tasks.py`）。指标从 log 算：完成与否和原因、turn、tool 调用（含被拒的）、无效调用、
+  自动续上次数、是否压缩、token、耗时。lite-eval target `lite_agent.eval_target:agent`（extra `eval`，lite-eval 0.4.1，
+  与 lite-mem 同一个 wheel），suite `agent-fake`（Fake 重放每个任务的正确路径，12/12）和 `agent-ollama`（S5b 用）。
+  - 规则 → 测试：每个任务的正确路径判为完成且指标是确定的数字、错误路径判为未完成并说出原因
+    （`tests/unit/test_eval_tasks.py`；让检查永远通过，11 条错误路径失败，第 12 条 done-en 失败在 run 的结局上）；
+    数据集与 `TASKS` 一致、Fake 上两次结果相同（`tests/integration/test_eval_target.py`）；`-m ollama` 冒烟只跑
+    chain-en（qwen3:8b，13 秒，通过）。
+  - 与 plan 的出入：`tool_calls` 数的是模型要求的调用（被拒的也算），不是执行了的；错误路径里"完成条件一直没满足"
+    的结局是 `failed (incomplete)`（自动续上用完后 harness 就这样结束），不是 check 的原因。
+  - 收尾 `/simplify`：采纳——十二个任务改用关键字参数、`kind` 是 `Literal`；tool 的参数模型移到模块级；
+    `Metrics.as_dict` 用 `dataclasses.asdict`；`stop` 直接取 `RunResult.stop`；token 指标数每一次计费的调用
+    （摘要和失败的调用也算，与预算一致；原来只数 `model_turn`，`test_tokens_count_every_model_call_as_the_budget_does`
+    先红）；手动改日期的 `TASKS_VERSION` 换成内容哈希。记下不做：`say` / `use` 与 `tests/helpers.py` 各留一份
+    （src 不能导入 tests）。
+  - 收尾 Codex（只读）：采纳——
+    - 答案按"值"匹配，不再按子串：`says()` 要求整段（30 不在 300 里，D02 不在 D021 里，数字和拉丁字母定边界）、
+      不在小数里、本分句里没有否定（not / n't / 没有 / 未）（`test_an_answer_says_a_value_only_as_a_whole_and_not_negated`，
+      14 例先红）；recover-en 接受"没送达，已发货"这种对照说法。
+    - done-en 的完成条件和它的 check 用同一个后置条件（原来"有任何留言"就结束，写错的留言没有机会改正；
+      `test_done_en_keeps_going_until_the_note_is_right`）。
+    - 新指标 `unknown_usage`：端点没报 token 的调用数，区分"0 token"和"不知道"。
+    - 缓存身份：`versions()` 的 `code` 是整个 `lite_agent` 包（`.py`、`.md`、`.sql`）的哈希，循环代码在工作区里的改动
+      也会让缓存失效（原来只有包的版本号）；`test_the_code_version_moves_when_any_of_lite_agents_code_changes`
+      （去掉 `.py` 时它失败）。
+    否决：
+    - "long-en 量的是压缩阈值"：阈值（150 估算 token）低到 8 个 tool 结果本身就超过，任何认真做完的 agent 都会
+      触发压缩；这个任务要测的就是"压缩后开头的规则还在不在"，没压缩就没测到它，判为未完成是对的。
+    - "无效调用不含 `denied`、`truncated_turn`"：这个指标数的是模型自己调错（不存在的 tool、参数不合法）；gate
+      拒绝和被截断的轮次不是调用写错，任务里也没有 gate；名字和注释已经这么说。
+    - "测试里 `setup(None)`"：Fake 不读数据集；Ollama 也不读，这是 target 的实际行为。
+  - `says()` 是 Codex 修复里新加的逻辑，按规则再做一轮只针对它的 Codex review：否定只认紧挨着值的
+    （中间只许 yet / been / be），"not only shipped"、"isn't it shipped?" 不再算否定；认出"不是已发货吗"。4 例先红。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 

@@ -1,6 +1,6 @@
 # lite-agent
 
-**Status: S4** (stage plan: design §15). The core runs: a tool loop over a
+**Status: S5a** (stage plan: design §15). The core runs: a tool loop over a
 [lite-model](https://github.com/ArthurGao/lite-model) role, every step recorded in an append-only
 event log, and each request derived from that log. Tool arguments are validated, results are cut to
 a budget, and turn, token and cost budgets stop a session. Gates can refuse a call or stop for a person's

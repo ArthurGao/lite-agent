@@ -1,0 +1,12 @@
+# S5 (lite-agent design §15): the task set on lite-model's fake, replaying each task's scripted
+# correct path. Deterministic, no model, no network: it checks the harness, the tasks and the
+# metrics, not a model. tests/integration/test_eval_target.py runs the same in CI.
+#   uv run lite-eval run eval/lite-eval/suites/agent-fake.yaml
+name: agent-fake
+dataset: ../datasets/agent
+targets:
+  - python: lite_agent.eval_target:agent
+    configs:
+      - {name: fake, backend: fake, model: fake}
+scorers:
+  - exact_match: {field: done, expected: done}
