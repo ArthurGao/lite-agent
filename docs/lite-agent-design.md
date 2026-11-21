@@ -1102,6 +1102,9 @@ docs/lite-agent-design.md
     不过去；每个测试结束时终止它开的 inbox workflow。
   - `test_migrate_applies_then_says_up_to_date` 的期望输出改成两个迁移（`0001_initial, 0002_inbox`）：这是新迁移带来的、
     预期中的行为变化，不是为了让测试通过而改测试。
+- **v0.2.0（2026-11-21）**：S6 与 S7 的发版。公共接口的加法：`Agent.run` / `resume` 的 `run_id`、`new_session`，`Runner.run` 同步；
+  extra `server`、`temporal`；迁移 `0002`、`0003`（inbox）。事件词汇表没有变（`tests/unit/test_vocabulary.py` 的 V=1 指纹不变）。
+  Release：`https://github.com/ArthurGao/lite-agent/releases/download/v0.2.0/lite_agent-0.2.0-py3-none-any.whl`。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 

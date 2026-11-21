@@ -1,6 +1,6 @@
 # lite-agent
 
-**v0.1.0** (2026-11-21; stage plan: design §15). The core runs: a tool loop over a
+**v0.2.0** (2026-11-21; stage plan: design §15). The core runs: a tool loop over a
 [lite-model](https://github.com/ArthurGao/lite-model) role, every step recorded in an append-only
 event log, and each request derived from that log. Tool arguments are validated, results are cut to
 a budget, and turn, token and cost budgets stop a session. Gates can refuse a call or stop for a person's
@@ -21,8 +21,10 @@ in a synthetic shop on lite-eval; the baseline on local qwen3 models is in desig
 From the GitHub Release (lite-agent is not on PyPI; it brings lite-model 0.4.0 along):
 
 ```
-uv add "lite-agent @ https://github.com/ArthurGao/lite-agent/releases/download/v0.1.0/lite_agent-0.1.0-py3-none-any.whl"
-uv add "lite-agent[pg] @ https://github.com/ArthurGao/lite-agent/releases/download/v0.1.0/lite_agent-0.1.0-py3-none-any.whl"     # + the PostgreSQL session store and the liteagent CLI
+uv add "lite-agent @ https://github.com/ArthurGao/lite-agent/releases/download/v0.2.0/lite_agent-0.2.0-py3-none-any.whl"
+uv add "lite-agent[pg] @ https://github.com/ArthurGao/lite-agent/releases/download/v0.2.0/lite_agent-0.2.0-py3-none-any.whl"     # + the PostgreSQL session store and the liteagent CLI
+uv add "lite-agent[server] @ https://github.com/ArthurGao/lite-agent/releases/download/v0.2.0/lite_agent-0.2.0-py3-none-any.whl"  # + the HTTP shell (liteagent serve)
+uv add "lite-agent[temporal,pg] @ https://github.com/ArthurGao/lite-agent/releases/download/v0.2.0/lite_agent-0.2.0-py3-none-any.whl"   # + durable runs, the inbox and timers
 ```
 
 ## Example
