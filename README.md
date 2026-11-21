@@ -97,6 +97,11 @@ await runner.decide(wid, approve={"c1": True})     # answers a paused run
 step = await runner.result(wid)
 ```
 
+An always-on agent reads one durable inbox (`lite-agent[temporal,pg]`): every trigger writes to it
+through `enqueue(...)`, deduplicated on its source's id, and one workflow per inbox runs the work.
+Follow-ups and schedules (`PgInbox.add_follow_up`, `add_schedule`) only enqueue when due; a person's
+answer to a paused run comes back as an inbox event (design §9.1).
+
 The design, its decisions and the stage plan are in [`docs/lite-agent-design.md`](docs/lite-agent-design.md) (Chinese). License: Apache-2.0.
 
 ## Developing

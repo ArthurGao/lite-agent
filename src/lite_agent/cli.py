@@ -194,8 +194,13 @@ def worker(
     task_queue: Annotated[str, typer.Option(help="the Temporal task queue to poll")] = "lite-agent",
     target: Annotated[str, typer.Option(help="the Temporal frontend")] = "127.0.0.1:7233",
     namespace: Annotated[str, typer.Option()] = "default",
+    inbox: Annotated[
+        bool, typer.Option(help="also run the inbox workers (postgres store)")
+    ] = False,
+    timers: Annotated[bool, typer.Option(help="also start the scheduler (needs --inbox)")] = False,
 ) -> None:
-    """A Temporal worker for AgentWorkflow and its run activity (design §9; the temporal extra)."""
+    """A Temporal worker for AgentWorkflow and its run activity (design §9; the temporal extra);
+    with --inbox, the inbox workers too, and with --timers, the scheduler (design §9.1)."""
     try:
         from temporalio.client import Client
 
@@ -207,10 +212,24 @@ def worker(
         registry = load_agents(agents)
     except RegistryError as exc:
         raise _fail(str(exc)) from None
+    if timers and not inbox:
+        raise _fail("--timers needs --inbox: the scheduler only writes to inboxes")
+    box = None
+    if inbox:
+        pg = _pg()
+        if not isinstance(registry.sessions, pg.PgSessionStore):
+            raise _fail('--inbox needs [store] kind = "postgres": the inbox is a table')
+        from lite_agent.pg.inbox import PgInbox
+
+        box = PgInbox(registry.sessions)
 
     async def go() -> None:
         client = await Client.connect(target, namespace=namespace)
-        await make_worker(client, task_queue, registry).run()
+        if timers:
+            from lite_agent.temporal import start_timers
+
+            await start_timers(client, task_queue)
+        await make_worker(client, task_queue, registry, inbox=box).run()
 
     asyncio.run(go())
 

@@ -49,7 +49,11 @@ def test_migrate_applies_then_says_up_to_date(env: str) -> None:
         conn.execute(f"DROP SCHEMA IF EXISTS {TEST_SCHEMA} CASCADE")
     first = runner.invoke(app, ["migrate"])
     second = runner.invoke(app, ["migrate"])
-    assert (first.exit_code, first.output) == (0, f"applied 0001_initial to {TEST_SCHEMA}\n")
+    # S7b added 0002_inbox
+    assert (first.exit_code, first.output) == (
+        0,
+        f"applied 0001_initial, 0002_inbox to {TEST_SCHEMA}\n",
+    )
     assert (second.exit_code, second.output) == (0, f"{TEST_SCHEMA} is up to date\n")
 
 
@@ -222,3 +226,18 @@ def test_worker_refuses_a_bad_agents_file_before_it_connects(tmp_path: Any) -> N
     shown = runner.invoke(app, ["worker", "--agents", str(bad)])
     assert shown.exit_code == 1
     assert shown.stderr == "error: agent 'a': cannot import tests.contract.nowhere:clock\n"
+
+
+def test_worker_inbox_needs_the_postgres_store_and_timers_need_the_inbox(tmp_path: Any) -> None:
+    memory = tmp_path / "agents.toml"
+    memory.write_text(
+        '[store]\nkind = "memory"\n[agents.clock]\nfactory = "tests.contract.server_agents:clock"\n'
+    )
+    no_pg = runner.invoke(app, ["worker", "--agents", str(memory), "--inbox"])
+    no_inbox = runner.invoke(app, ["worker", "--agents", str(memory), "--timers"])
+    assert no_pg.exit_code == 1 and "postgres" in no_pg.stderr
+    assert (
+        no_inbox.exit_code == 1
+        and no_inbox.stderr
+        == "error: --timers needs --inbox: the scheduler only writes to inboxes\n"
+    )

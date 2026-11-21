@@ -8,7 +8,7 @@ step = await runner.result(workflow_id)
 """
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from temporalio.client import Client
 from temporalio.worker import Worker
@@ -17,8 +17,24 @@ from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxR
 from lite_agent.registry import Registry
 from lite_agent.store import new_id
 from lite_agent.temporal.activities import RUN, AgentActivities
+from lite_agent.temporal.inbox import (
+    INBOX_WORKFLOW,
+    TIMER_WORKFLOW,
+    InboxActivities,
+    enqueue,
+    inbox_workflow_id,
+    start_timers,
+)
 from lite_agent.temporal.types import AgentInput, Call, Decision, Step, ToolResultData
-from lite_agent.temporal.workflows import AGENT_WORKFLOW, AgentWorkflow
+from lite_agent.temporal.workflows import (
+    AGENT_WORKFLOW,
+    AgentWorkflow,
+    InboxWorkflow,
+    TimerWorkflow,
+)
+
+if TYPE_CHECKING:
+    from lite_agent.pg.inbox import PgInbox
 
 # lite-agent and what it imports are deterministic library code the workflow only passes data
 # through: loaded once outside the sandbox, not again for every workflow run.
@@ -34,17 +50,25 @@ def make_worker(
     task_queue: str,
     registry: Registry,
     *,
+    inbox: "PgInbox | None" = None,
     activities: Sequence[Any] = (),
     heartbeat_s: float = 10.0,
 ) -> Worker:
-    """A worker that runs `AgentWorkflow` and the run activity for `registry`'s agents;
-    `activities` adds the host's own (host-executed tools)."""
+    """A worker that runs `AgentWorkflow` and the run activity for `registry`'s agents; with
+    `inbox`, also the inbox workers and the scheduler (design §9.1). `activities` adds the
+    host's own (host-executed tools)."""
     runs = AgentActivities(registry, heartbeat_s=heartbeat_s)
+    workflows: list[type] = [AgentWorkflow]
+    acts: list[Any] = [runs.run, *activities]
+    if inbox is not None:
+        box = InboxActivities(inbox, client)
+        workflows += [InboxWorkflow, TimerWorkflow]
+        acts += [box.take, box.finish, box.fire]
     return Worker(
         client,
         task_queue=task_queue,
-        workflows=[AgentWorkflow],
-        activities=[runs.run, *activities],
+        workflows=workflows,
+        activities=acts,
         workflow_runner=SANDBOX,
     )
 
@@ -100,15 +124,23 @@ class TemporalRunner:
 
 __all__ = [
     "AGENT_WORKFLOW",
+    "INBOX_WORKFLOW",
     "RUN",
     "SANDBOX",
+    "TIMER_WORKFLOW",
     "AgentActivities",
     "AgentInput",
     "AgentWorkflow",
     "Call",
     "Decision",
+    "InboxActivities",
+    "InboxWorkflow",
     "Step",
     "TemporalRunner",
+    "TimerWorkflow",
     "ToolResultData",
+    "enqueue",
+    "inbox_workflow_id",
     "make_worker",
+    "start_timers",
 ]
