@@ -949,7 +949,10 @@ docs/lite-agent-design.md
 - **S5.5（2026-11-21）**：v0.1.0。版本号、README 加安装方式、事件词汇表 V=1 从此冻结（§4）。
   `tests/unit/test_readme.py` 把 README 的例子原样执行一遍，只把 `build_async` 换成脚本化的 fake
   （把 README 里一个方法名改坏，它会失败）。Codex 只读 review 一条，采纳：冻结原来只是文字，加了 `test_vocabulary.py`
-  守住它（给 `model_switched` 加一个字段而不升 V，它会失败）。Release：`https://github.com/ArthurGao/lite-agent/releases/download/v0.1.0/lite_agent-0.1.0-py3-none-any.whl`。
+  守住它（给 `model_switched` 加一个字段而不升 V，它会失败）。
+  - 发版：tag `v0.1.0`（`4fa94d5`），CI run 44876227588 的 test / package（tag 与 wheel 版本一致）/ release 全部成功，
+    Release 带 wheel 和 sdist。发版后的验收：一个全新的项目从 Release 的 URL 安装（带上 lite-model 0.4.0），README
+    的例子原样在本机 qwen3:8b 上跑出 `completed`，8 个事件与 README 一致。Release：`https://github.com/ArthurGao/lite-agent/releases/download/v0.1.0/lite_agent-0.1.0-py3-none-any.whl`。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 
