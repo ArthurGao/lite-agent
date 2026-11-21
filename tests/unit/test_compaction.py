@@ -17,7 +17,7 @@ from lite_model.testing import AsyncFakeModel
 
 from lite_agent import Agent, Budget, Projection, RunError, SummaryCompactor, derive
 from lite_agent.compaction import estimate_tokens
-from lite_agent.events import Compaction, ModelErrorEvent, ModelTurn
+from lite_agent.events import Compaction, ModelErrorEvent, ModelTurn, UsageData
 from tests.helpers import Billed, Recording, agent, call, events_of, kinds, say
 
 ALWAYS = {
@@ -500,3 +500,93 @@ def test_render_makes_up_its_own_boundary_when_none_is_given() -> None:
 
     one, two = (render([Message("user", "Hi.")]).splitlines()[0] for _ in range(2))
     assert one != two and len(one.split()[1]) >= 16
+
+
+# --- a real local model, 2026-11-21: the summariser continued the chat instead of summarising ---
+
+
+def test_the_transcript_ends_with_the_instruction_again() -> None:
+    # With the instruction only in the system message, qwen3:8b (thinking off) answered the last
+    # question of the transcript instead of summarising it in 6 runs of 6.
+    _, transcript = tight().prompt([Message("user", "What is the capital of France?")])
+    mark = transcript.content.splitlines()[0].split()[1]
+    tail = transcript.content.splitlines()[-2:]
+    assert tail[0] == f"--- {mark} end of the transcript ---"
+    assert "reply with the summary only" in tail[1].lower()
+    assert "do not answer" in tail[1].lower()
+
+
+async def test_a_header_line_the_summariser_copied_is_not_kept() -> None:
+    model = AsyncFakeModel(
+        agent=[say("One."), say("Two."), say("Three.")],
+        compact=[say("--- 9ab16f9dd40174b0 assistant ---\nThe user runs heron-7 on port 8431.")],
+    )
+    a = agent(model, compaction=tight())
+    first = await a.run("First?")
+    await a.run("Second?", session_id=first.session_id)
+    await a.run("Third?", session_id=first.session_id)
+    done = next(e for e in await events_of(a, "id1") if isinstance(e, Compaction))
+    assert done.summary.endswith("\n\nThe user runs heron-7 on port 8431.")
+    assert "9ab16f9dd40174b0" not in done.summary
+
+
+async def test_a_summary_with_nothing_in_it_is_not_used() -> None:
+    model = AsyncFakeModel(
+        agent=[say("One."), say("Two."), say("never asked")],
+        compact=[say("--- 9ab16f9dd40174b0 assistant ---\n   ")],
+    )
+    a = agent(model, compaction=tight())
+    first = await a.run("First?")
+    await a.run("Second?", session_id=first.session_id)
+    third = await a.run("Third?", session_id=first.session_id)
+    assert third.error == RunError("model", "EmptySummary")
+    assert "compaction" not in kinds(await events_of(a, "id1"))
+
+
+def test_only_transcript_headers_are_dropped_from_a_summary() -> None:
+    from lite_agent.compaction import clean
+
+    text = (
+        "--- 0123456789abcdef0123 assistant ---\n--- Key facts ---\nheron-7, port 8431\n---\nDone."
+    )
+    assert clean(text) == "--- Key facts ---\nheron-7, port 8431\n---\nDone."
+
+
+@pytest.mark.parametrize(
+    "copied",
+    [
+        "--- 0123456789ABCDEF0123 assistant ---",
+        "---  0123456789abcdef0123   assistant  ---",
+        "--- 0123456789abcdef0123 assistant ---\r",
+        "  --- 0123456789abcdef0123 user ---  ",
+    ],
+    ids=["uppercase", "extra_spaces", "crlf", "indented"],
+)
+def test_a_copied_header_is_dropped_however_it_was_retyped(copied: str) -> None:
+    from lite_agent.compaction import clean
+
+    assert clean(f"{copied}\nheron-7, port 8431") == "heron-7, port 8431"
+
+
+async def test_an_empty_summary_is_billed_and_does_not_switch_models() -> None:
+    usages = [Usage(input=5, output=1)] * 2 + [Usage(input=40, output=3)]
+    model = Billed(
+        usages,
+        agent=[say("One."), say("Two."), say("never asked")],
+        compact=[say("--- 9ab16f9dd40174b0 assistant ---")],
+        backup=[say("never asked")],
+    )
+    a = agent(model, compaction=tight(), fallback_role="backup")
+    first = await a.run("First?")
+    await a.run("Second?", session_id=first.session_id)
+    third = await a.run("Third?", session_id=first.session_id)
+
+    assert (third.error, third.switched) == (RunError("model", "EmptySummary"), False)
+    failed = (await events_of(a, "id1"))[-2]
+    assert isinstance(failed, ModelErrorEvent)
+    assert (failed.purpose, failed.role, failed.usage) == (
+        "compact",
+        "compact",
+        UsageData(input=40, output=3),
+    )
+    assert third.usage == Usage(input=40, output=3) and asked(model, "backup") == []
