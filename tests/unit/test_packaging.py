@@ -34,6 +34,7 @@ def test_the_wheel_carries_the_license_the_types_and_its_own_lite_model(wheel: P
         assert "Apache License" in zf.read(f"{info}/licenses/LICENSE").decode()
     assert "License-Expression: Apache-2.0" in metadata
     assert "lite_agent/py.typed" in names  # hosts type-check against it (mypy strict)
+    assert "lite_agent/pg/migrations/0001_initial.sql" in names  # `liteagent migrate` reads it
     assert not [n for n in names if n.startswith("tests/")]
     # the wheel installs on its own: lite-model is named by URL in the metadata (design §13)
     requires = [

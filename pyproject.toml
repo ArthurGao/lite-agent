@@ -13,10 +13,18 @@ license-files = ["LICENSE"]
 dependencies = [
     "lite-model @ https://github.com/ArthurGao/lite-model/releases/download/v0.4.0/lite_model-0.4.0-py3-none-any.whl",
     "pydantic==2.14.3",
+    "pydantic-settings==2.16.2",
+]
+
+[project.optional-dependencies]
+# The PostgreSQL session store (design §15 S4); the same psycopg as lite-cache and lite-mem.
+pg = [
+    "psycopg[binary,pool]==3.3.8",
 ]
 
 [dependency-groups]
 dev = [
+    "lite-agent[pg]",  # the PostgreSQL store's tests run in CI
     "pytest>=8.3",
     "pytest-asyncio>=1.0",
     "ruff>=0.8",
