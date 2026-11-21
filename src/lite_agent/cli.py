@@ -188,5 +188,32 @@ def serve(
     uvicorn.run(create_app(registry), host=host, port=port)
 
 
+@app.command()
+def worker(
+    agents: Annotated[Path, typer.Option(help="agents.toml: the agents this worker runs")],
+    task_queue: Annotated[str, typer.Option(help="the Temporal task queue to poll")] = "lite-agent",
+    target: Annotated[str, typer.Option(help="the Temporal frontend")] = "127.0.0.1:7233",
+    namespace: Annotated[str, typer.Option()] = "default",
+) -> None:
+    """A Temporal worker for AgentWorkflow and its run activity (design §9; the temporal extra)."""
+    try:
+        from temporalio.client import Client
+
+        from lite_agent.registry import RegistryError, load_agents
+        from lite_agent.temporal import make_worker
+    except ImportError as exc:  # temporalio is the `temporal` extra
+        raise _fail("worker needs the temporal extra: install lite-agent[temporal]") from exc
+    try:
+        registry = load_agents(agents)
+    except RegistryError as exc:
+        raise _fail(str(exc)) from None
+
+    async def go() -> None:
+        client = await Client.connect(target, namespace=namespace)
+        await make_worker(client, task_queue, registry).run()
+
+    asyncio.run(go())
+
+
 def main() -> None:
     app()

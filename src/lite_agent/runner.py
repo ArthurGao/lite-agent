@@ -1,5 +1,6 @@
 """Where a run's steps execute (design §9). `InProcessRunner` runs them in the caller's event
-loop; a durable runner (Temporal) is another implementation of the same protocol."""
+loop. The Temporal runner (`lite_agent.temporal`) is a host-side API of its own, not this
+protocol: an `Agent` cannot cross to a worker process, so workers run agents by name."""
 
 from typing import TYPE_CHECKING, Protocol
 

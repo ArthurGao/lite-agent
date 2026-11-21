@@ -81,6 +81,22 @@ curl -sN localhost:8730/sessions/<session_id>/events/stream          # SSE until
 A paused run goes on with `POST /sessions/<id>/resume` (`expected_seq`, `approve`, `results`);
 `POST /sessions/<id>/fork` branches a session. Design §10 has the protocol.
 
+## Durable runs (Temporal)
+
+With `lite-agent[temporal]`, a run is a Temporal workflow: a worker that dies mid-run is replaced and
+the run goes on from its log, a paused run waits for a signal for as long as it takes, and a tool a
+host executes (in TypeScript, say) is an activity on that host's task queue.
+
+```
+from lite_agent.temporal import TemporalRunner, make_worker
+
+worker = make_worker(client, "agents", load_agents("agents.toml"))  # or: liteagent worker
+runner = TemporalRunner(client, "agents")
+wid = await runner.start("support", "Refund order B03.", routes={"lookup": "ts-tools"})
+await runner.decide(wid, approve={"c1": True})     # answers a paused run
+step = await runner.result(wid)
+```
+
 The design, its decisions and the stage plan are in [`docs/lite-agent-design.md`](docs/lite-agent-design.md) (Chinese). License: Apache-2.0.
 
 ## Developing

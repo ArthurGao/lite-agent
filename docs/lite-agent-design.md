@@ -464,22 +464,43 @@ class Runner(Protocol):                         # where the loop's steps execute
 - 对有未完成 call 的 session 调 `run(task)` 仍然抛 `UnresolvedCalls`（提示用 `resume()`）：在缺结果的历史上再加一条
   任务，API 会拒绝，而且可能已经执行过的 tool 不能盲目重跑。
 
-## 9. Runner 与 Temporal（S7，可选）
+## 9. Runner 与 Temporal（S7）
 
 - `InProcessRunner`（默认）：loop 在调用方的 event loop 里跑完或暂停。
-- `TemporalRunner`（`lite-agent[temporal]`）：workflow 只做编排，模型调用和 tool 执行各是一个 activity；
-  model activity 的重试尊重厂商的 Retry-After（cairn 的 `MODEL_RETRY`）。
-  - event log 仍是事实来源，Temporal history 只保存进度。activity 写 log 要幂等（`expected_seq` + op id）。
-  - 暂停 = workflow 等 signal；审批和外部 tool 结果通过 signal 进来。
-  - 长 session 用 Continue-As-New，下一段从 log 恢复。
-  - TypeScript 宿主可以在自己的 task queue 上实现 tool activity，Python workflow 按名字调用。
-  - 确定性：workflow 代码不读 store，只根据 **activity 的返回值**做决定（activity 返回它追加的事件摘要：
-    stop 原因、待执行的 call、是否暂停）。读写 log 只在 activity 里。
-  - activity 可能在完成副作用后、Temporal 记下完成前失败并被重试：每个 activity 带确定的 op id
-    （`run_id` + 步号），追加事件前先查这个 op 是否已写过；tool 的重复执行按 §8 的规则处理。
-  - 这一节只是方向。做 S7 之前先把它写成完整设计（边界、重试策略、replay 和 activity 重试的测试）。
-- **inbox / timer**（KB §12）：每个触发源写同一个 durable inbox，一个 inbox 一个 worker；timer 只负责入队。
-  随 TemporalRunner 一起设计，届时在本文加一节。
+- **Temporal**（`lite-agent[temporal]`，temporalio 1.36.1；S7a）：`lite_agent.temporal`。
+
+**粒度：一个 activity 是一次完整的 `Agent.run` / `resume`**（跑到结束或暂停，边跑边发心跳），不是"每次模型调用、每次
+tool 执行各一个 activity"（这一节原来的方向）。理由：
+- event log 已经让 loop 在事件粒度上可以接着跑：§3 的 `run_id` 让重试的 activity 不开第二个 run，§8 的规则处理死在
+  tool 里的 call；
+- 再把每一步拆成 activity，就有了两个编排者，各自记录进度（KB `llm-app-architecture` §7.1）。
+模型调用的重试仍归 lite-model（同一个 target，Retry-After 由它处理）；activity 的重试只针对 worker 崩溃。
+
+**`AgentWorkflow`**（`lite_agent.AgentWorkflow`）：
+- 它只根据 activity 的返回值做决定（`Step`：outcome、stop、text、等待的 call 及其 tool 名和参数）；读写 log 只在
+  activity 里，所以 workflow 代码是确定的。
+- 每个 run 的 `run_id` 和新 session 的 `session_id` 来自 `workflow.uuid4()`（replay 时相同）。activity 重试时带着
+  同一个 `run_id`，由 §3 的规则保证不开第二个 run。
+- 暂停时：
+  - 等宿主执行的 tool（reason `tool`），名字在 `routes` 里的 → 在那个 task queue 上调用同名 activity，结果作为
+    `Resume.results` 交回（TypeScript 宿主就在自己的 worker 里实现这些 activity）；activity 失败 → 给模型一个只带类型名的错误结果；
+  - 其余（审批、核对）→ 等 signal `decide(approve, results)`；一个 decision 只对这次暂停还在等的 call 有效（给已经答完的暂停、
+    或已经由宿主 tool 解决的 call 的回答会被忽略）；resume 进行时到的回答，只为 resume 之后仍在等的同一批 call 保留；
+  - 然后用新的 `run_id` 调 activity 做 resume。
+- query `status`：上一个 run 的 `Step`（一个暂停的 session 在等什么）。
+- **Continue-As-New**：在暂停处，这一段 workflow 已经执行了 `max_runs` 个 run（默认 50）、或 Temporal 建议时；暂停的
+  `Step` 和已收到的 decision 带到下一段，下一段从 log 接着跑。从带过来的暂停开始的一段，在自己执行过 run 之前不再
+  Continue-As-New（否则会一直接续下去：测试抓到过）。
+- 重试策略：最多 5 次；`UnknownAgent`、`UnknownSession`、`UnresolvedCalls`、`ValueError` 不重试。超时可配：run 一小时、
+  心跳两分钟、宿主 tool 十分钟。
+- 沙箱：`lite_agent`、`lite_model`、`pydantic` 在沙箱外加载一次（`SANDBOX`），workflow 代码只让数据穿过它们。
+
+**入口**：
+- worker 进程：`make_worker(client, task_queue, registry)` 或 `liteagent worker --agents agents.toml --task-queue …`（§10 的 agent 登记）。
+- 宿主：`TemporalRunner(client, task_queue)`：`start(agent, task, routes=…)` → workflow id、`decide(...)`、`status(...)`、`result(...)`。
+  它没有实现 `Runner` 协议：一个 `Agent` 对象不能跨进程传过去，worker 里的 agent 按名字登记。
+
+- **inbox / timer**（KB §12）：S7b，见 §9.1（随 S7b 写）。
 
 ## 10. HTTP 壳（S6）
 
@@ -1010,6 +1031,23 @@ docs/lite-agent-design.md
     这几条测的是工厂，现在显式写 `kind = "memory"`；整个测试集也在没有 `.env` 的目录外跑过一遍（PG 测试按设计报错，其余通过）。
   - 本机验收：`liteagent serve`（loopback 8730）用本机 qwen3:8b 跑一次，curl 发起、SSE 跟随到 `run_finished completed`，
     `/openapi.json` 200；跑完关掉。
+- **S7a（2026-11-21）**：TemporalRunner（§9）。测试在 time-skipping 测试服务器上跑（标记 `temporal`，默认就跑，CI 也跑）：
+  跑到结束；暂停 → signal 批准 → 完成；宿主 tool 路由到另一个 task queue 上的 activity；activity 在 run 做完之后、Temporal
+  记下之前失败 → 重试不开第二个 run、tool 只跑一次；worker 死在非幂等 tool 里 → 重试时要求核对、signal 带结果后完成；
+  Continue-As-New 把暂停的 run 带过去；录下的 history 在 `Replayer` 上回放无误（`tests/temporal/test_runner.py`）。关掉
+  "log 里已有这个 run"的识别，两条重试测试失败。
+  - 测试抓到的 bug：从带过来的暂停开始的一段立刻又 Continue-As-New，无限接续（测试服务器报 http2 错误）；修成这一段执行过
+    run 之后才会接续。
+  - 测试里的一个坑：只发 query 不会推动 time-skipping 服务器的时钟，activity 重试的退避就一直等着；等暂停时用 `env.sleep`。
+  - 收尾 `/simplify`：采纳——Continue-As-New 用 `dataclasses.replace` 复制输入（以后加的字段不会被丢掉）；调用方错误的列表
+    只写一处；`step_of` 用具体类型；`runner.py` 的说明改正（Temporal 不是 `Runner` 协议的实现）；测试里的 `Worker` 导入一次。
+    记下不做：`ToolResultData` 与 `ToolOutcome` 合并、`Waiting` 带上 tool 名和参数（都改 §3 的接口）；`start()` 暴露超时、
+    把 `RUN` / `PERMANENT` 移进 `types.py`（让 workflow 模块不再导入整个 agent）。
+  - 收尾 Codex（只读）：采纳四条，都先写测试见红——一个旧的 decision 会答到后来的暂停上（`test_a_decision_for_an_answered_pause_never_reaches_a_later_one`，
+    原来 workflow 因 resume 被拒而失败）；人的结果会覆盖宿主 tool 的结果（同一个修法：只认这次暂停还在等的 call）；心跳任务取消后要等它结束；
+    `liteagent worker` 缺 extra 时给安装提示。另补测试：宿主 tool 永久失败 → 模型拿到只带类型名的错误结果，run 继续
+    （把异常原样抛出时它失败）。修复之后第二轮只针对 workflow 的 Codex：分两次 signal 回答同一个暂停时，resume 期间到的第二个回答
+    会被清掉——改成只为仍在等的同一批 call 保留（`still_relevant`，单元测试 `tests/unit/test_temporal_decisions.py` 先红）。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 
