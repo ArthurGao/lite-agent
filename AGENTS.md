@@ -42,6 +42,7 @@ baseline (qwen3:8b 0.750, with thinking 0.889; qwen3:1.7b 0.417) and the timings
 (`liteagent serve`, extra `server`) and caller-named runs (`run_id`). **S7a done 2026-11-21** — the TemporalRunner (a run as an
 activity, `AgentWorkflow`, `liteagent worker`; extra `temporal`). **S7b done 2026-11-21** — the inbox and timers for always-on
 agents (PostgreSQL tables, `InboxWorkflow`, `TimerWorkflow`, `enqueue`). S7 is complete.
+**v0.2.0 released 2026-11-21** (S6 and S7; the event vocabulary is still V=1).
 
 ## Rules
 
