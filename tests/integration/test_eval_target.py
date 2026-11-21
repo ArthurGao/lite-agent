@@ -58,7 +58,13 @@ async def test_on_the_fake_every_task_is_done_the_same_way_every_time() -> None:
 def test_the_target_says_what_decides_its_output() -> None:
     fake, live = agent(), agent("ollama", "qwen3:8b")
     assert (fake.deterministic, live.deterministic) == (True, False)
-    assert live.config() == {"backend": "ollama", "model": "qwen3:8b", "reasoning_effort": "none"}
+    assert live.config() == {
+        "backend": "ollama",
+        "model": "qwen3:8b",
+        "reasoning_effort": "none",
+        "temperature": None,
+    }
+    assert agent("ollama", "qwen3:8b", temperature=0.6).config()["temperature"] == 0.6
     assert set(fake.versions()) == {"lite-agent", "lite-model", "code"}
     assert fake.billing() == "free"
 

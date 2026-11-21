@@ -170,9 +170,11 @@ def _told_out_of_stock(world: World) -> bool:
 
 # --- the tasks ---
 
-LONG_IDS = ("A17", "A18", "B04", "B05", "D03", "D04", "E01", "E02")
-# The amounts of LONG_IDS at most 100: 42 + 6.50 + 35 + 79.90 + 18 + 56 + 12.50 (D03 is 120)
-LONG_SUM = "249.90"
+# A chain: each order names the next, so a model cannot look them up all at once (in the first
+# baseline both models fetched a list of ids in one turn, and nothing was left to summarise).
+LONG_IDS = ("F01", "F02", "F03", "F04", "F05", "F06", "F07", "F08")
+# The amounts at most 100: 24 + 61.50 + 9.90 + 33 + 77.25 + 15 + 48.35 (F03 is 140)
+LONG_SUM = "269.00"
 
 
 def _long_script() -> tuple[AssistantTurn, ...]:
@@ -339,18 +341,18 @@ TASKS: tuple[Task, ...] = (
         id="long-en",
         lang="en",
         kind="long",
-        prompt="Rule for this task: leave out every order whose amount is above 100. Look up these "
-        f"orders one at a time: {', '.join(LONG_IDS)}. Then give the total amount of the orders "
-        "that are left.",
+        prompt="Rule for this task: leave out every order whose amount is above 100. Start with "
+        "order F01; each order names the next one to look up. Follow them to the last one, then "
+        "give the total amount of the orders that are left.",
         check=lambda w, ev, a: judge(
             (len(calls(ev, "get_order")) >= len(LONG_IDS), "did not look up every order"),
             (any(isinstance(e, Compaction) for e in ev), "the history was never summarised"),
             (says(a, LONG_SUM), f"the total is not {LONG_SUM}"),
         ),
         script=_long_script(),
-        summary="The user said: leave out every order above 100, look up A17, A18, B04, B05, "
-        "D03, D04, E01, E02 one at a time and give the total of the rest. Looked up so far: "
-        "A17 42.00, A18 6.50, B04 35.00, B05 79.90, D03 120.00 (above 100), D04 18.00.",
+        summary="The user said: leave out every order above 100, follow the orders from F01 to "
+        "the last and give the total of the rest. Looked up so far: F01 24.00, F02 61.50, "
+        "F03 140.00 (above 100, left out), F04 9.90, F05 33.00, F06 77.25.",
         compact_at=150,
     ),
     Task(

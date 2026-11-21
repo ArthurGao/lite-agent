@@ -907,6 +907,44 @@ docs/lite-agent-design.md
     - "测试里 `setup(None)`"：Fake 不读数据集；Ollama 也不读，这是 target 的实际行为。
   - `says()` 是 Codex 修复里新加的逻辑，按规则再做一轮只针对它的 Codex review：否定只认紧挨着值的
     （中间只许 yet / been / be），"not only shipped"、"isn't it shipped?" 不再算否定；认出"不是已发货吗"。4 例先红。
+- **S5b（2026-11-21）**：Ollama 基线，两轮（评测卡片在 KB `global/llm-evals/`）。每个任务 3 次、一次只跑一个
+  任务。lite-model 对 Ollama 的默认温度是 0（贪心），3 次结果相同；所以第二轮加了温度 0.6 的抽样配置看波动。
+  - **第一轮**（贪心）：qwen3:8b 8/12，qwen3:1.7b 5/12。读完每一个失败的事件 log 后，发现评测工具有两处缺陷，
+    不是模型的问题：long-en 里两个模型都在一轮里并行查完 8 个订单，没有可压缩的内容，测不到压缩；tool 参数
+    说明的示例 id（"such as C1"）是小店里真实的客户，两个模型都把 Bo 猜成 C1。修法：long-en 改成一条订单链
+    （每个订单写明下一个，`test_the_long_tasks_orders_can_only_be_followed_in_turn`）；示例改成小店里没有的
+    id（`test_no_tool_example_names_something_in_the_shop`）。两条都先红。
+  - **第二轮**：
+
+    | 配置 | 完成率 | 波动（3 次的最低 / 最高） |
+    | --- | --- | --- |
+    | qwen3:8b 贪心 | 0.750 | 0.750 / 0.750 |
+    | qwen3:8b 温度 0.6 | 0.722 | 0.667 / 0.750 |
+    | qwen3:8b thinking | 0.889 | 0.833 / 0.917 |
+    | qwen3:1.7b 贪心 | 0.417 | 0.417 / 0.417 |
+    | qwen3:1.7b 温度 0.6 | 0.417 | 0.417 / 0.417 |
+
+    8b 贪心和抽样的差距在波动以内，是噪声；thinking 高出波动之外，但每个任务慢约 10 倍（中位数 22.6 秒 vs 2.4 秒）。
+  - **失败归类**（读过事件 log）：
+    - 不查就猜：act-en "全额退款" 两个模型都直接退 100，没先查订单金额（thinking 3/3 做对）。
+    - 不会纠错：recover-en 查 "17" 得到 "no order 17" 就放弃或原样复述，没想到去按邮箱找客户的订单（五个配置
+      全部 0/3）。
+    - 小模型不调 tool：1.7b 的 chain 任务直接说"查不到"，或用文字描述"我会调用 find_customer"而不调用；
+      skill-zh 不读退款政策就说能全额退。
+    - 压缩后的摘要出错：long-en 现在真的会压缩（9 轮、6 次摘要），关 thinking 的配置 0/3。重放一次看到摘要里有
+      事实错误（"F03 没有查"、"F03 (140) 低于 100"、F02 金额写错），最终答案靠后面的轮次碰巧才对。这接上 S3b
+      记下的摘要质量问题；改摘要提示要按规则 13 前后各跑一次这个任务集。
+    - 第一轮 done-en 的 C1 错误在第二轮消失（8b 3/3），说明确实是示例 id 引起的。
+  - 记下：贪心在 Ollama 上不保证可复现——评测里 long-en 三次都错，同样的配置单独重放一次却做对了。
+  - 出处：lite-eval 的 run 目录在本机 `eval/lite-eval/runs/agent-ollama/`（gitignored，与 lite-mem 一样），run id：
+    第一轮 `20261121T043144397423Z-qwen3-1.7b-c09861`, `20261121T043223892153Z-qwen3-8b-3fbf1e`；第二轮 `20261121T044011332103Z-qwen3-1.7b-62d6d6`, `20261121T044144876458Z-qwen3-1.7b-t0.6-23eacc`, `20261121T044301422408Z-qwen3-8b-07e8fc`, `20261121T044937768209Z-qwen3-8b-t0.6-d3384a`, `20261121T045636952523Z-qwen3-8b-think-e1f855`。
+    逐个任务的完成数、原因和耗时抄进 KB 的评测卡片。失败归类来自重放（`run_task` 加上打印事件的脚本），
+    不在 run 目录里：target 只记事件类型，不记内容。
+  - 收尾 `/simplify`：采纳——基准脚本的一条注释和 `original_chars` 的值。记下不改：long-en 的订单链有一条捷径，
+    F01–F08 都属于客户 C5，模型可以 `list_orders C5` 一次拿到全部，就又不需要压缩了；重放里 qwen3:8b 是逐个查的；
+    评测的 run 只记了调用次数、没记调用了哪个 tool，查不出别的 run 有没有走捷径。改它会让基线不可比，留到下次改任务集时一起改（给每个 F 订单不同的客户）。
+  - 收尾 Codex（只读）：采纳——写明上面的出处。否决——"suite 的 `timeout_s: 600` 没传给 lite-model"：说得对，
+    但基线有意按宿主拿到的默认值（120 秒）跑，thinking 撞上它本身就是要记的发现（见 §16）。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 
@@ -922,8 +960,10 @@ docs/lite-agent-design.md
   等现有项目都明确不做 model-driven tool loop，llm-steward 是治理层）。没有真实任务，S3 做哪些 tool、
   S5 的评测集、S7 做不做都只能猜。S0–S2 不依赖这个答案。
 - ~~**【阻塞 P0】lite-model 的 tool 调用接口**~~：2026-11-21 定并实现（lite-model 设计 §3.1）。
-- **OpenAI 兼容后端的 reasoning 内容**：lite-model 0.4.0 不采集、不回传（它的 §15）。用这类模型（Ollama、
-  DeepSeek 的思考模式）跑 agent 之前要先核实它们是否要求在 tool 轮次之间传回。
+- **OpenAI 兼容后端的 reasoning 内容**：lite-model 0.4.0 不采集、不回传（它的 §15）。S5b 在 Ollama 上核实：
+  qwen3:8b 开 thinking（`reasoning_effort: medium`）、推理内容不回传，任务集完成率 0.889，高于关 thinking 的
+  0.750，Ollama 不要求回传。DeepSeek 等别的端点仍待核实。新问题：thinking 的单次调用会超过 lite-model 默认
+  的 120 秒超时（long-en 一次 `CallFailed`），用 thinking 的宿主要把 `timeout_s` 调大。
 - **preserved thinking 的 400 与别的失败分不开**：投影规则（§4）应当让它不发生；真发生了是 `CallFailed`，
   会触发 `fallback_role`。要不要让 lite-model 给它一个单独的错误类型，S2 做 fallback 时定。
 - **streaming**：v1 事件粒度是一轮。交互式 UI 需要逐 token 时，要 lite-model 先支持 streaming。
@@ -933,7 +973,9 @@ docs/lite-agent-design.md
 - **花了钱但没进 log 的调用**：模型已回复而 `append` 失败时（普通轮次或摘要），这次调用的 usage 不在 log 里，
   预算会少算这一笔（§4）。彻底的做法是调用之前先写一条"意图"事件，之后再对上；S7 的 durable runner 需要
   类似的东西，到时一起定。
-- **投影的开销**：长 session 每一步全量投影；是否按 seq 缓存（KB §9.3 的开放问题，S5 测了再定）。
+- ~~**投影的开销**~~：S5b 测了（`scripts/bench_projection.py`）。每一步的 `derive()`：200 / 1000 / 5000 个事件
+  中位数 0.22 / 1.13 / 5.96 ms；PG 尾部读取 0.47 / 0.50 / 0.74 ms，三层 fork 末端 1.6 / 2.0 / 4.6 ms；整读 2 / 9 / 59 ms
+  （只在 run 开始时）。模型调用是秒级，**不缓存投影，读取也不改成一条递归 CTE**；session 到几万个事件时再测。
 - **memory 与 llm-steward**：agent 写 memory 是直接用 lite-mem，还是必须经过 llm-steward 的治理。
 - **HTTP 端口**：提议 8730（8700 lite-rag、8710 lite-mem、8720–8722 lite-eval）；S6 时在 KB
   `global/machine/ports.md` 登记后才算数。

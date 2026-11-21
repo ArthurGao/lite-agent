@@ -101,9 +101,9 @@ WRONG: dict[str, tuple[tuple[AssistantTurn, ...], str]] = {
     "long-en": (
         (
             *(use((f"g{i}", "get_order", {"order_id": o})) for i, o in enumerate(LONG_IDS)),
-            say("The total is 369.90."),  # D03 kept: the rule from the start was lost
+            say("The total is 409.00."),  # F03 kept: the rule from the start was lost
         ),
-        "the total is not 249.90",
+        "the total is not 269.00",
     ),
     "done-en": (
         (
@@ -220,3 +220,25 @@ async def test_usage_a_model_did_not_report_is_counted_as_unknown() -> None:
     billed = Billed([Usage(input=5, output=1)] * 2, agent=list(task.script))
     m = (await run_task(task, billed)).metrics
     assert (m.input_tokens, m.unknown_usage) == (10, 0)
+
+
+def test_no_tool_example_names_something_in_the_shop() -> None:
+    # S5b: in the first baseline both models sent Bo's note to C1, the example in the schema
+    from lite_agent.evals import World
+
+    world = World()
+    real = set(world.customers) | set(world.orders) | set(world.stock)
+    for t in world.tools():
+        schema = str(t.parameters)
+        assert not [x for x in real if f"such as {x}" in schema], t.name
+
+
+def test_the_long_tasks_orders_can_only_be_followed_in_turn() -> None:
+    from lite_agent.evals import World
+
+    orders = World().orders
+    chain, at = [], "F01"
+    while at:
+        chain.append(at)
+        at = orders[at].next_order or ""
+    assert tuple(chain) == LONG_IDS
