@@ -869,6 +869,9 @@ docs/lite-agent-design.md
       是快照；"源为空时什么都不写"不会发生——存在的 session 至少有 `session_started`。
     - "很长的 session 一次读进内存、一批写入"：记进 §16；分批又要全有或全无，得在 store 里加事务接口。
     - "`config` 会显示 `sslkey` 这类路径"：路径不是凭据；凡是 `*password*` 的参数都已隐藏。
+  - 合并后的自动安全审查（采纳）：`show` 转义了控制字符，`sessions` 的行和每条错误信息（会引用 session id，
+    id 由宿主决定）却没有；现在 CLI 打印的每个宿主给的字符串都经过同一个转义
+    （`test_ids_and_errors_are_escaped_too`，先见红）。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 

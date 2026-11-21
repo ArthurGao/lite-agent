@@ -31,7 +31,7 @@ app = typer.Typer(no_args_is_help=True, add_completion=False, help=__doc__)
 
 
 def _fail(message: str) -> typer.Exit:
-    typer.echo(f"error: {message}", err=True)
+    typer.echo(f"error: {_safe(message)}", err=True)  # messages quote ids, which are the host's
     return typer.Exit(1)
 
 
@@ -109,7 +109,8 @@ def sessions(limit: Annotated[int, typer.Option(min=1)] = 50) -> None:
     for r in rows:
         forked = f"{r.parent_id}@{r.fork_seq}" if r.parent_id else "-"
         created = r.created_at.isoformat(timespec="seconds")
-        typer.echo(f"{r.id:<34} {r.tail:>6}  {r.last_outcome or '-':<12}  {forked:<22}  {created}")
+        row = f"{r.id:<34} {r.tail:>6}  {r.last_outcome or '-':<12}  {forked:<22}  {created}"
+        typer.echo(_safe(row))  # ids are whatever the host chose
 
 
 def _summary(e: Event) -> str:
@@ -151,7 +152,7 @@ def show(
 @app.command()
 def fork(session_id: str, at: Annotated[int, typer.Option("--at", min=1)]) -> None:
     """A new session sharing `session_id`'s events up to seq `--at`; prints its id."""
-    typer.echo(_with_store(lambda store: store.fork(session_id, at_seq=at)))
+    typer.echo(_safe(_with_store(lambda store: store.fork(session_id, at_seq=at))))
 
 
 @app.command()
@@ -160,7 +161,7 @@ def config() -> None:
     settings = _settings()
     url = settings.database_url
     shown = _pg().redact_conninfo(url) if url else "(not set)"
-    typer.echo(f"database_url  {shown}")
+    typer.echo(f"database_url  {_safe(shown)}")
     typer.echo(f"schema        {settings.schema_name}")
 
 
