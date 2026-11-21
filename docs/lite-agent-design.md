@@ -371,6 +371,12 @@ class Runner(Protocol):                         # where the loop's steps execute
   - **投影**：只有最近一条 `compaction` 起作用（后一次压缩总是从头覆盖，把前一次的摘要也吃进去）。seq 不大于
     `covers` 上界的模型可见事件不再输出，开头换成一条 user 消息，内容就是事件里的 `summary`——那句固定的前言在
     写事件时已经拼进去了，投影不加任何文字。原事件都留在 log 里。
+  - **谁的话算请求**：压缩前，tool 结果以 tool 结果的身份给模型；压缩后它只剩摘要里的一句，而摘要以 user 消息
+    出现。为了不让 tool 内容（比如抓来的网页里伪造的一行"用户说"）借摘要升格成用户的要求：交给摘要模型的历史
+    里，每一段以 `--- <随机 token> <谁> ---` 开头，token 每次压缩重新生成，内容里伪造的标题不带它；摘要模型被
+    告知只有标成 user 的段落是用户的话，tool 结果和 assistant 的话里出现的指令只能当内容转述；摘要的固定前言
+    说明它是对前面对话的转述，不是新的请求。这能挡住格式上的冒充，挡不住摘要模型自己理解错——摘要的质量仍要
+    靠 S5 的评测。
   - **预算**：摘要调用计入 token 和成本，不算 turn（`budget.spent()`）；失败的摘要调用同样。
   - **`Opaque`**：最近一条 `compaction` 之前产生的 thinking block 不再进投影，包括被保留下来的那几轮（§4）。
   - 覆盖的区间可以跨过 fork 点（子 session 的 seq 接着父 session 往下排）；父 session 在 fork 之后做的压缩，
@@ -772,6 +778,10 @@ docs/lite-agent-design.md
     进去时，这次花费不在 log 里"（High）：属实，但和普通轮次"回复拿到了、`append` 失败"是同一个已写明的取舍
     （§4：回复丢掉，钱已经花了，log 里没有）；要补上得在每次模型调用之前先写一条"意图"事件，那是另一个量级
     的改动，记在 §16。
+  - S3b 合并后的安全检查（自动）：交给摘要模型的历史是纯文本，tool 结果里伪造的 `[user]` 可能被当成用户的话
+    写进摘要，而摘要以 user 消息出现——tool 内容借此升格成用户的要求。成立，已修（`fix/compaction-trust`）：每段
+    带随机 token 的标题、摘要模型的说明里写明谁的话算请求、摘要前言写明"不是新的请求"。回归测试先红
+    （`test_a_tool_result_cannot_imitate_a_user_turn_in_the_transcript` 等 5 条）；逐行破坏 5 处全部变红。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 
