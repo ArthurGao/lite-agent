@@ -19,7 +19,6 @@ import ipaddress
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Annotated, Any
-from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -106,11 +105,17 @@ def create_app(registry: Registry, *, poll_s: float = 1.0) -> FastAPI:
         # Bound to loopback, but a web page can still reach it: by rebinding its own name to
         # 127.0.0.1 (its Host is then that name) or by sending from the browser (its Origin is
         # the page's). With no authentication, only loopback names are served.
-        if not _loopback_name(_host_name(request.headers.get("host", ""))):
+        host = request.headers.get("host", "")
+        if not _loopback_name(_host_name(host)):
             return JSONResponse({"detail": "only loopback host names are served"}, status_code=400)
+        # a page from anywhere else, another port on this machine included, is a foreign origin
         origin = request.headers.get("origin")
-        if origin is not None and not _loopback_name(urlsplit(origin).hostname):
+        if origin is not None and origin != f"http://{host}":
             return JSONResponse({"detail": "requests from web pages are refused"}, status_code=403)
+        # a JSON body needs a CORS preflight a foreign page never passes; a form does not
+        kind = request.headers.get("content-type", "").split(";")[0].strip().lower()
+        if request.method == "POST" and kind != "application/json":
+            return JSONResponse({"detail": "send application/json"}, status_code=415)
         return await call_next(request)
 
     store = registry.sessions

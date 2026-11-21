@@ -509,7 +509,8 @@ class Runner(Protocol):                         # where the loop's steps execute
   到别处，一律拒绝。没有认证；要对外提供时再设计认证和多租户。
 - **网页够不着它**：绑在 loopback 上，网页仍然可以把自己的域名重新解析到 127.0.0.1（DNS rebinding），或者直接从浏览器
   发请求。所以每个请求的 `Host` 必须是 loopback 名字（`127.0.0.1`、`::1`、`localhost`，带不带端口），否则 400；带了
-  `Origin` 的必须也是 loopback，否则 403。
+  `Origin` 的必须**正好是壳自己的**（`http://` 加同一个 `Host`；本机别的端口上的页面也算外来的），否则 403；每个 POST 必须是
+  `application/json`（表单或纯文本的 POST 不需要 CORS 预检，网页能盲发），否则 415。
 - **关闭**：shutdown 时等还在跑的 run 结束（`drain`），不在一轮中间切断。
 - TypeScript 宿主：FastAPI 生成的 `/openapi.json`；不做 TS 包。宿主提供 tool 的方式：MCP server（按需阶段）、外部执行
   （§7，暂停 → `resume` 带结果）、Temporal activity（§9）。
@@ -1002,6 +1003,11 @@ docs/lite-agent-design.md
   - 合并前的自动安全审查（采纳）：没有认证的 loopback 服务会被 DNS rebinding 或浏览器里的页面调用（包括批准一个暂停的
     run）。加了 `Host` / `Origin` 检查（`test_a_request_from_a_web_page_is_refused`，不注册这个检查时 4 例失败）。顺带修了
     一条依赖时序的测试：一个 session 一个 run 的测试原来假定第一个 run 还没跑完，现在第一个 run 的模型等测试放行才回复。
+  - 推送后的第二次安全审查（采纳）：`Origin` 只要是 loopback 就放行太宽，本机另一个开发服务器的页面也能调用；改成必须
+    正好是壳自己的 origin，POST 只收 JSON（`test_another_origin_on_this_machine_is_refused`、`test_a_post_that_is_not_json_is_refused`，
+    先红）。没做 bearer token：要对外或多用户使用时随认证一起设计。
+  - CI 第一次红：`agents.toml` 的几条测试没写 `[store]`，默认是 postgres，读环境变量和 `.env`——本机有 `.env` 就过了，CI 没有。
+    这几条测的是工厂，现在显式写 `kind = "memory"`；整个测试集也在没有 `.env` 的目录外跑过一遍（PG 测试按设计报错，其余通过）。
   - 本机验收：`liteagent serve`（loopback 8730）用本机 qwen3:8b 跑一次，curl 发起、SSE 跟随到 `run_finished completed`，
     `/openapi.json` 200；跑完关掉。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了

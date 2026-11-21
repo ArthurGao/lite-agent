@@ -153,6 +153,11 @@ def test_the_shell_binds_only_to_loopback() -> None:
 # --- the registry from agents.toml ---
 
 
+# The factory cases name a store: without one it is postgres, which reads the environment (and
+# `.env`), so the case would test the machine, not the factory (red in CI on 2026-11-21).
+MEMORY = '[store]\nkind = "memory"\n'
+
+
 def write(tmp_path: Path, body: str) -> Path:
     path = tmp_path / "agents.toml"
     path.write_text(body)
@@ -185,11 +190,20 @@ factory = "tests.contract.server_agents:payer"
             '[store]\nkind = "redis"\n[agents.a]\nfactory = "tests.contract.server_agents:clock"\n',
             "store",
         ),
-        ('[agents.a]\nfactory = "tests.contract.nowhere:clock"\n', "cannot import"),
-        ('[agents.a]\nfactory = "tests.contract.server_agents:missing"\n', "cannot import"),
-        ('[agents.a]\nfactory = "no-colon"\n', "module:function"),
-        ('[agents.a]\nfactory = "tests.contract.server_agents:not_an_agent"\n', "not an Agent"),
-        ('[agents.a]\nfactory = "tests.contract.server_agents:own_store"\n', "shared store"),
+        (MEMORY + '[agents.a]\nfactory = "tests.contract.nowhere:clock"\n', "cannot import"),
+        (
+            MEMORY + '[agents.a]\nfactory = "tests.contract.server_agents:missing"\n',
+            "cannot import",
+        ),
+        (MEMORY + '[agents.a]\nfactory = "no-colon"\n', "module:function"),
+        (
+            MEMORY + '[agents.a]\nfactory = "tests.contract.server_agents:not_an_agent"\n',
+            "not an Agent",
+        ),
+        (
+            MEMORY + '[agents.a]\nfactory = "tests.contract.server_agents:own_store"\n',
+            "shared store",
+        ),
         ('[agents.a]\nfactory = "tests.contract.server_agents:clock"\ntools = []\n', "unknown key"),
     ],
 )
@@ -283,8 +297,32 @@ async def test_a_request_from_a_web_page_is_refused(
     assert (await client.get("/agents", headers=headers)).status_code in (400, 403)
 
 
-async def test_loopback_names_and_a_loopback_origin_are_served(client: httpx.AsyncClient) -> None:
+async def test_loopback_names_and_the_shells_own_origin_are_served(
+    client: httpx.AsyncClient,
+) -> None:
     for host in ("127.0.0.1:8730", "localhost:8730", "[::1]:8730"):
         assert (await client.get("/agents", headers={"host": host})).status_code == 200
-    local = {"origin": "http://127.0.0.1:8730"}
-    assert (await client.get("/agents", headers=local)).status_code == 200
+    own = {"host": "127.0.0.1:8730", "origin": "http://127.0.0.1:8730"}
+    assert (await client.get("/agents", headers=own)).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "origin", ["http://127.0.0.1:3000", "http://localhost:8730", "https://127.0.0.1:8730", "null"]
+)
+async def test_another_origin_on_this_machine_is_refused(
+    client: httpx.AsyncClient, origin: str
+) -> None:
+    # security review 2026-11-21 (second): any loopback origin was too broad, a local dev
+    # server's page could call the shell; only the shell's own origin is taken
+    headers = {"host": "127.0.0.1:8730", "origin": origin}
+    r = await client.post("/runs", json={"agent": "clock", "task": "Time?"}, headers=headers)
+    assert r.status_code == 403
+
+
+async def test_a_post_that_is_not_json_is_refused(client: httpx.AsyncClient) -> None:
+    # a form or text/plain POST needs no CORS preflight: a page could send one blind
+    body = '{"agent": "clock", "task": "Time?"}'
+    for kind in ("text/plain", "application/x-www-form-urlencoded", None):
+        headers = {"content-type": kind} if kind else {}
+        r = await client.post("/runs", content=body, headers=headers)
+        assert r.status_code == 415, kind
