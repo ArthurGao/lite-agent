@@ -518,6 +518,8 @@ tool 执行各一个 activity"（这一节原来的方向）。理由：
   结论作为 decision 事件进来再接着跑（KB §12.4）。agent 接不了的事件（session 并不在等 decision、或在等 resume 时又来了一条消息）
   标记 refused，不无限重试；**其余失败**（模型或数据库不在的时间比一项的重试还长）不丢工作：这一项留在 pending，worker 等一段
   （30 秒起，每次翻倍，最多一小时）后**原样**重试它——同样的事件、同样的 session id 和 run id，做了一半的 run 接着跑。没有事件
+  但一项从第一次失败起超过 `max_retry_s`（默认一天）还在失败，就标成 **`failed`** 留给人看（毒消息不能永远挡住后面的事件；
+  迁移 `0003` 加了这个状态）。没有事件
   就等 signal `wake`，最多等 `idle_check_s`（五分钟）也会自己看一眼；批次够多或 Temporal 建议时 Continue-As-New（工作在 inbox
   里，不在 history 里；待重试的一项带过去）。
 - **`TimerWorkflow`**（全局一个，id `lite-agent-timers`）：每 `interval_s` 醒一次，用 workflow 的时间调 `fire_due`，对写到的
@@ -1093,6 +1095,9 @@ docs/lite-agent-design.md
       一个 inbox 只有一个 worker，期间没有别的 run 进这个 session。
     - "重试后才出现的永久错误被当成短暂的"：Temporal 最终给出的 `ActivityError` 不论第几次尝试都是同一个形状（cause 是 activity
       抛出的 `ApplicationError`，`type` 是错误类名）；`test_an_event_the_agent_cannot_take_is_refused_and_the_worker_goes_on` 证明分类成立。
+  - 合并后的自动安全审查（采纳）："工作永不丢"也意味着一条每次都失败的消息（毒消息）会让 inbox 永远重试它、挡住后面所有事件。
+    改成一项从第一次失败起超过 `max_retry_s`（默认一天）就标 `failed` 留给人看，inbox 继续；`failed` 状态由迁移 `0003` 加
+    （`0002` 已经在用，不改它）。`test_a_message_that_always_fails_is_set_aside_and_the_inbox_goes_on`，去掉上限时 inbox 永远不空。
   - 测试里的一个坑：同一个 time-skipping 服务器上，前面测试留下的 inbox workflow 有空闲计时器、却没有 worker 了——时间就跳
     不过去；每个测试结束时终止它开的 inbox workflow。
   - `test_migrate_applies_then_says_up_to_date` 的期望输出改成两个迁移（`0001_initial, 0002_inbox`）：这是新迁移带来的、

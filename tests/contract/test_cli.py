@@ -49,10 +49,10 @@ def test_migrate_applies_then_says_up_to_date(env: str) -> None:
         conn.execute(f"DROP SCHEMA IF EXISTS {TEST_SCHEMA} CASCADE")
     first = runner.invoke(app, ["migrate"])
     second = runner.invoke(app, ["migrate"])
-    # S7b added 0002_inbox
+    # S7b added 0002_inbox, then 0003_inbox_failed
     assert (first.exit_code, first.output) == (
         0,
-        f"applied 0001_initial, 0002_inbox to {TEST_SCHEMA}\n",
+        f"applied 0001_initial, 0002_inbox, 0003_inbox_failed to {TEST_SCHEMA}\n",
     )
     assert (second.exit_code, second.output) == (0, f"{TEST_SCHEMA} is up to date\n")
 

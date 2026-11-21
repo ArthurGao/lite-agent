@@ -18,7 +18,7 @@ from psycopg import sql
 
 from lite_agent.pg.store import PgSessionStore
 
-Status = Literal["done", "refused"]
+Status = Literal["done", "refused", "failed"]
 
 
 @dataclass(frozen=True)

@@ -102,6 +102,7 @@ class Retry:
     session_id: str
     run_id: str
     backoff_s: float
+    since: str = ""  # when it first failed (workflow time, ISO): retried until max_retry_s
 
 
 @dataclass
@@ -117,6 +118,9 @@ class InboxInput:
     idle_check_s: float = 300.0  # look at the inbox this often even if nobody wakes it
     backoff_s: float = 30.0  # before retrying an item that failed for a passing reason; doubles
     max_backoff_s: float = 3600.0
+    # An item still failing this long after its first failure is set aside as `failed` (a
+    # poison message must not hold up the inbox for ever); an outage shorter than this is lived.
+    max_retry_s: float = 86400.0
     retry: Retry | None = None  # carried across Continue-As-New
 
 

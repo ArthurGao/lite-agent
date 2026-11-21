@@ -11,7 +11,7 @@ from temporalio.common import WorkflowIDConflictPolicy
 from lite_agent.temporal.types import InboxInput, TimerInput, ToolResultData, WorkItem
 
 if TYPE_CHECKING:  # the pg extra: a worker without an inbox never needs psycopg
-    from lite_agent.pg.inbox import InboxEvent, PgInbox
+    from lite_agent.pg.inbox import InboxEvent, PgInbox, Status
 
 TAKE = "lite_agent.inbox.take"
 FINISH = "lite_agent.inbox.finish"
@@ -118,9 +118,10 @@ class InboxActivities:
 
     @activity.defn(name=FINISH)
     async def finish(self, ids: list[int], status: str, run_session: str | None) -> None:
-        await self.inbox.finish(
-            ids, status="refused" if status == "refused" else "done", run_session=run_session
+        marked: Status = (
+            "failed" if status == "failed" else "refused" if status == "refused" else "done"
         )
+        await self.inbox.finish(ids, status=marked, run_session=run_session)
 
     @activity.defn(name=FIRE)
     async def fire(self, now: str, given: TimerInput) -> int:
