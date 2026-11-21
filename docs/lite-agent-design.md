@@ -209,8 +209,9 @@ class Runner(Protocol):                         # where the loop's steps execute
 字段平铺在事件上。事件是 frozen 的 Pydantic 模型，`dump()` / `load()` 做 JSON 往返；`load()` 拒绝未知的 `type`、
 多余的字段和更新的 `v`。S1 实现了下表里的 8 种：`session_started`、`run_started`、`user_message`、`model_turn`、
 `tool_started`、`tool_result`、`model_error`、`run_finished`；S2b 加了 `paused`、`resumed`；其余在用到它的阶段加。
-**`V` 在 v0.1.0 发版之前保持 1**：还没有发过版，也没有持久化的 store，不存在旧 log；从 v0.1.0 起词汇表才算冻结，
-之后的变化才升版本。
+**从 v0.1.0 起 `V = 1` 冻结**（2026-11-21 发版）：发版之前一直保持 1，因为没有旧 log 要读。从此以后，改动任何
+事件的形状都要把 `V` 升一级，并保留读旧版本的代码：PostgreSQL store（S4 起）里存着的 log 必须一直读得出来。
+`tests/unit/test_vocabulary.py` 为每个 V 存一份所有事件类型 JSON Schema 的指纹，形状变了而 V 没升就失败。
 
 | type | data | 模型可见 |
 | --- | --- | --- |
@@ -945,6 +946,10 @@ docs/lite-agent-design.md
     评测的 run 只记了调用次数、没记调用了哪个 tool，查不出别的 run 有没有走捷径。改它会让基线不可比，留到下次改任务集时一起改（给每个 F 订单不同的客户）。
   - 收尾 Codex（只读）：采纳——写明上面的出处。否决——"suite 的 `timeout_s: 600` 没传给 lite-model"：说得对，
     但基线有意按宿主拿到的默认值（120 秒）跑，thinking 撞上它本身就是要记的发现（见 §16）。
+- **S5.5（2026-11-21）**：v0.1.0。版本号、README 加安装方式、事件词汇表 V=1 从此冻结（§4）。
+  `tests/unit/test_readme.py` 把 README 的例子原样执行一遍，只把 `build_async` 换成脚本化的 fake
+  （把 README 里一个方法名改坏，它会失败）。Codex 只读 review 一条，采纳：冻结原来只是文字，加了 `test_vocabulary.py`
+  守住它（给 `model_switched` 加一个字段而不升 V，它会失败）。Release：`https://github.com/ArthurGao/lite-agent/releases/download/v0.1.0/lite_agent-0.1.0-py3-none-any.whl`。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
 

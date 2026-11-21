@@ -1,6 +1,6 @@
 # lite-agent
 
-**Status: S5** (stage plan: design §15). The core runs: a tool loop over a
+**v0.1.0** (2026-11-21; stage plan: design §15). The core runs: a tool loop over a
 [lite-model](https://github.com/ArthurGao/lite-model) role, every step recorded in an append-only
 event log, and each request derived from that log. Tool arguments are validated, results are cut to
 a budget, and turn, token and cost budgets stop a session. Gates can refuse a call or stop for a person's
@@ -13,7 +13,19 @@ outgrows the model: the summary is one more event that says what it covers, and 
 Sessions live in memory by default, or in PostgreSQL with the `pg` extra (`PgSessionStore`, its own
 schema, a log the database refuses to rewrite). A session resumes or forks in any process, and
 `copy_session` moves one between stores. `liteagent` (with `pg`) applies the migrations and lists,
-shows and forks sessions. Not released yet.
+shows and forks sessions. An evaluation (`lite_agent.evals`, extra `eval`) runs a fixed task set
+in a synthetic shop on lite-eval; the baseline on local qwen3 models is in design §15 (S5b).
+
+## Install
+
+From the GitHub Release (lite-agent is not on PyPI; it brings lite-model 0.4.0 along):
+
+```
+uv add "lite-agent @ https://github.com/ArthurGao/lite-agent/releases/download/v0.1.0/lite_agent-0.1.0-py3-none-any.whl"
+uv add "lite-agent[pg] @ https://github.com/ArthurGao/lite-agent/releases/download/v0.1.0/lite_agent-0.1.0-py3-none-any.whl"     # + the PostgreSQL session store and the liteagent CLI
+```
+
+## Example
 
 ```python
 import asyncio

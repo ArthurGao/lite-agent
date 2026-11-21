@@ -38,7 +38,8 @@ history it covers, `SummaryCompactor`. S3 is complete. S4 in two parts: **S4a do
 fork across processes, `copy_session`, the `liteagent` CLI. S4 is complete. S5 in two parts: **S5a done 2026-11-21** — a
 synthetic shop, twelve tasks judged in code, the lite-eval target (extra `eval`). **S5b done 2026-11-21** — the Ollama
 baseline (qwen3:8b 0.750, with thinking 0.889; qwen3:1.7b 0.417) and the timings. S5 is complete.
-Next: S5.5 (the v0.1.0 release wheel).
+**S5.5: v0.1.0 released 2026-11-21** (a GitHub Release wheel; event vocabulary V=1 frozen). Next: S6 / S7 on
+demand (design §15).
 
 ## Rules
 
