@@ -1252,6 +1252,21 @@ docs/lite-agent-design.md
 - **streaming**：v1 事件粒度是一轮。交互式 UI 需要逐 token 时，要 lite-model 先支持 streaming。
 - ~~**session store 的默认持久化**~~：S4a 做了 PostgreSQL（`PgSessionStore`）。文件 store 仍在"按需"里。
 - **过大的 tool 结果**：只截断，还是把完整结果另存一份（blob 表 / 文件）并在事件里留引用。
+  2026-11-27 定了**另存时怎么做**（还没有排进阶段，等有宿主需要时再做；只是一个提议，§3 的接口没有改）：
+  - **什么时候做**：等某个宿主的 tool 结果确实超过了 `tool_result_chars`，而且量出来截断影响了回答，先测量，再做。
+    在那之前，行为和现在一样（§4：截断，记 `original_chars`）。
+  - **形状**：新增一个 Protocol `ArtifactStore`（`async put(data: bytes, media_type) -> ref`、
+    `async get(ref, offset, limit) -> bytes`），和 `Memory`、`SkillSource` 一样在构造 `Agent` 时注入，默认没有。
+    给了之后：超过预算的结果完整地 `put` 进去，`tool_result` 事件仍然存截断后的预览，另外记 `ref` 和
+    `original_chars`；同时自动多一个 tool `read_artifact(ref, offset, limit)`，让模型能分段读被截掉的部分。
+    只存不读等于没存。`tool_result` 多一个字段，事件词汇表要升一个版本（V=3），旧的 log 照常读。
+  - **实现**：`LocalDirArtifacts`（核心，测试和单机用）；`PgArtifacts`（extra `pg`，和 `PgSessionStore` 放在
+    同一个库）；`S3Artifacts`（新的 extra `s3`，或者由宿主自己实现）。和别的 Protocol 一样，一个 session 换一种
+    实现也能 resume（AGENTS.md 规则 6），前提是 ref 指向的内容还在。
+  - **约束**：按内容 hash 寻址，只追加不覆盖。事件日志不可改，fork 和 resume 依赖它，所以事件引用的 artifact
+    也不能被改或单独删掉；只能随整个 session 一起删。
+  - **边界**：这里只管 agent 运行中产生的大输出。知识文档的原文归 lite-rag / llm-steward 的导入流程，用户上传的
+    业务文件归宿主。不另建仓库（KB `global/llm-app-architecture.md` §13.11）。
 - **tool 并行**：同一轮多个 call 是否并行执行；并行时结果事件的顺序按 call 顺序写。
 - **花了钱但没进 log 的调用**：模型已回复而 `append` 失败时（普通轮次或摘要），这次调用的 usage 不在 log 里，
   预算会少算这一笔（§4）。彻底的做法是调用之前先写一条"意图"事件，之后再对上；S7 的 durable runner 需要
