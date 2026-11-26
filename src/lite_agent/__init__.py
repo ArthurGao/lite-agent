@@ -14,6 +14,7 @@ from lite_agent.errors import (
     UnresolvedCalls,
 )
 from lite_agent.gates import Allow, Deny, Gate, PauseFor, RunContext
+from lite_agent.masking import Masker, ToolResultMasker
 from lite_agent.projection import Projection, derive
 from lite_agent.result import Pause, Resume, RunError, RunResult, ToolOutcome, Waiting
 from lite_agent.runner import InProcessRunner, Runner
@@ -33,6 +34,7 @@ __all__ = [
     "HarnessError",
     "InMemorySessionStore",
     "InProcessRunner",
+    "Masker",
     "Memory",
     "ModelTool",
     "NotesMemory",
@@ -54,6 +56,7 @@ __all__ = [
     "Tool",
     "ToolContext",
     "ToolOutcome",
+    "ToolResultMasker",
     "UnknownSession",
     "UnresolvedCalls",
     "Waiting",

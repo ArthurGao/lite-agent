@@ -28,6 +28,7 @@ from lite_agent.events import (
     StopReason,
     ToolDef,
     ToolResultEvent,
+    ToolResultsMasked,
     ToolStarted,
     UserMessage,
     blocks_of,
@@ -467,6 +468,20 @@ class _Run:
                 return await self.finish("failed", used_up)
             request = await self.projection()
             role = self.role()
+            # Masking first: no model call. It records what it masked, so the request is still
+            # the projection of the log (§4); it never fails the run (design §6).
+            masker = agent.masking
+            if masker is not None and (decision := masker.mask(self.log, role)) is not None:
+                await self.append(
+                    partial(
+                        ToolResultsMasked,
+                        masked=decision.masked,
+                        state=decision.state,
+                        tokens_before=decision.tokens_before,
+                        tokens_after=decision.tokens_after,
+                    )
+                )
+                request = await self.projection()
             compactor = agent.compaction
             if compactor is not None and compactor.due(request, role):
                 # at most once before a call: a compactor that is always due cannot loop

@@ -1,6 +1,6 @@
 # lite-agent 设计文档
 
-**状态：S1–S7 完成（2026-11-21）；v0.2.5（2026-11-26）：压缩器改用 lite-context（§6、§13）；事件与投影、tool loop、`@tool`、预算、gate、暂停 / 恢复、`fallback_role`、skills、memory、压缩、PG session store、CLI、lite-eval target（S5）、HTTP 壳（S6）、Temporal runner 与 inbox / timer（S7）。v0.1.0（S5.5，事件词汇表 V=1 冻结）与 v0.2.0 已发布。P0 是 lite-model v0.4.0 的 `turn()`。仓库公开在 github.com/ArthurGao/lite-agent。第一个宿主：llm-steward 的 reconcile 排查助手（2026-11-21 owner 定，§16）。**
+**状态：S1–S7 完成（2026-11-21）；v0.3.0（2026-11-26，事件词汇表 V=2）：用 lite-context 的 `fit()` 遮盖旧的 tool 结果（§6）；v0.2.5：压缩器改用 lite-context（§6、§13）；事件与投影、tool loop、`@tool`、预算、gate、暂停 / 恢复、`fallback_role`、skills、memory、压缩、PG session store、CLI、lite-eval target（S5）、HTTP 壳（S6）、Temporal runner 与 inbox / timer（S7）。v0.1.0（S5.5，事件词汇表 V=1 冻结）与 v0.2.0 已发布。P0 是 lite-model v0.4.0 的 `turn()`。仓库公开在 github.com/ArthurGao/lite-agent。第一个宿主：llm-steward 的 reconcile 排查助手（2026-11-21 owner 定，§16）。**
 与代码冲突时，在同一次改动里更新本文，并在 commit 里说明原因。
 
 ## 0. 决策记录
@@ -220,6 +220,10 @@ class Runner(Protocol):                         # where the loop's steps execute
 字段平铺在事件上。事件是 frozen 的 Pydantic 模型，`dump()` / `load()` 做 JSON 往返；`load()` 拒绝未知的 `type`、
 多余的字段和更新的 `v`。S1 实现了下表里的 8 种：`session_started`、`run_started`、`user_message`、`model_turn`、
 `tool_started`、`tool_result`、`model_error`、`run_finished`；S2b 加了 `paused`、`resumed`；其余在用到它的阶段加。
+**V=2（2026-11-26，v0.3.0）**：加了 `tool_results_masked`；V=1 的事件形状一个没变，V=1 的 log 照原样读出、投影不变
+（`tests/fixtures/v1_session.json` 是 v0.2.5 写的一段真实 log 和它当时的投影）。从 V=2 起信封里的 `v` 是**这种事件所属的
+版本**，不是代码的最新版本：V=1 就有的类型照旧写 `v=1`，只有 `tool_results_masked` 写 `v=2`（`v=1` 的它被拒绝）。所以没开
+遮盖的 session 全是 `v=1`，v0.2.5 的 worker、壳照样读；只有写过遮盖事件的 session，旧代码才会拒绝。
 **从 v0.1.0 起 `V = 1` 冻结**（2026-11-21 发版）：发版之前一直保持 1，因为没有旧 log 要读。从此以后，改动任何
 事件的形状都要把 `V` 升一级，并保留读旧版本的代码：PostgreSQL store（S4 起）里存着的 log 必须一直读得出来。
 `tests/unit/test_vocabulary.py` 为每个 V 存一份所有事件类型 JSON Schema 的指纹，形状变了而 V 没升就失败。
@@ -233,6 +237,7 @@ class Runner(Protocol):                         # where the loop's steps execute
 | `tool_started` | `call_id`、tool 名、参数、`external`；过了校验和 gate、在执行（或交给宿主执行）**之前**写。校验失败、`Deny`、`PauseFor` 都不写它（§8） | 否 |
 | `tool_result` | `call_id`、内容（已截断）、`is_error`、`error_kind`（`invalid_args` / `denied` / `exception` / `timeout` / `truncated_turn` / `outcome_unknown`）、`executed`（tool 是否被调用过）、`origin`（`executed` / `external` / `reconciled`）、`terminal`、原始长度 | 是 |
 | `compaction` | `summary`（模型看到的全文，含固定的前言）、`covers`（覆盖的 seq 区间，两端都含）、做摘要的 role、provenance、usage | 是（替代被覆盖的区间） |
+| `tool_results_masked`（V=2） | `masked`：每条被遮的 `tool_result` 的 seq 和从此给模型看的原文（lite-context 的 `MASKED_RESULT`，带 tool 名）；`state`：lite-context 的 `ContextState`（下一次在同一处切）；`tokens_before` / `tokens_after`（估算） | 是（替代那几条结果的内容） |
 | `paused` / `resumed` | `paused.waiting`：每个等待的 call 一项（`call_id`、原因 `approval` / `tool` / `reconcile`、gate 给人看的说明）；`resumed`：`approve`（call id → 是否批准）和带了结果的 call id 列表（结果本身在 `tool_result` 里） | 否 |
 | `model_error` | 失败调用的错误类型、role、`purpose`（`turn`，或 `compact`：一次没写成的摘要）、usage（拿不到时为 `None`） | 否 |
 | `model_switched` | from / to role、原因（§5 规则 11） | 否 |
@@ -371,6 +376,17 @@ class Runner(Protocol):                         # where the loop's steps execute
   换了 skills 再跑同一个 session，快照就变了，之前的 thinking block 不再进投影（§4），与换 system 的代价相同。
 - 这三个内置 tool 排在宿主的 tool 之后，和宿主的 tool 走同一条路：校验、gate、超时、事件一样不少（所以宿主的
   gate 可以拦 `remember`）。与宿主的 tool 重名时构造 `Agent` 报错。
+- **遮盖**（v0.3.0，V=2；`Masker` 协议：`check(roles)`、`mask(events, role)`）。不给 `masking` 就不遮。库里自带
+  `ToolResultMasker(context_tokens={role: n}, keep_last=3)`：每次模型调用之前、压缩之前（它不调模型）。把**没遮过的**
+  历史映射成 lite-context 的中立消息（key 是事件 seq，`e<seq>`；摘要是 `summary`），加上 run 快照里的 system 和 tool 定义
+  算作 fixed，用 lite-context 的 `fit()` + `MaskToolResults(keep_last)` 和上一次 `tool_results_masked` 里存的 `state`；
+  估算超过这个 role 阈值的 90% 才遮，遮到 70%。新被遮的结果写进一条 `tool_results_masked`（每条结果和它从此显示的原文），
+  投影照着这条事件替换，自己不加字（§4 规则 2）；同一条结果不会被遮两次。`fit()` 装不下（`DoesNotFit`）就什么都不遮，
+  交给压缩；lite-context 的任何别的拒绝也一样什么都不遮：遮盖从不让 run 失败。`keep_last` 至少是 1（最新的结果总是给模型看）。
+  `keep_tools`（默认 `load_skill`、`recall`）的结果从不遮：它们是模型接着要照着做的说明和笔记，不是读一次的数据——
+  在 lite-context 里把装着它们的那条消息标成 pinned。Ollama 评测里没有这条时，qwen3:8b 的 skill 任务从 3/3 掉到 0/3
+  （§15 阶段记录）。压缩之后存的 `state` 对不上（`StaleState`），重新量；读不出的 `state`（更新版本的
+  lite-context 写的）也重新量。两个都配时压缩的阈值应不低于遮盖的。估算不算 thinking block（与渲染一样）。
 - **压缩**（S3b；`Compactor` 协议：`check(roles)`、`due(projection, role)`、`cut(events)`、`prompt(history)`）。
   2026-11-26 起提问、渲染和摘要外框来自 lite-context（§13）：`render()` 把历史映射成 lite-context 的中立消息
   （`neutral.to_neutral`）再用它的 `render_transcript`；`frame(reply)` 用 lite-context 的 `SUMMARY` 包住回复，去掉抄回来的
@@ -1135,6 +1151,26 @@ docs/lite-agent-design.md
   （Codex 额度用完，Claude 子代理）：用 hypothesis 生成 2 万段历史、5 千条回复，旧实现（`git show` 出来的 v0.2.4 代码）和新实现
   逐字节相同；唯一的差别在公开的 `render()` 上传入 system 消息时——v0.2.4 渲染成一个 system 段，现在 `ValueError`；loop 永远
   不会传（`projection.history` 不含 system），写进文档和测试。
+
+- **v0.3.0（2026-11-26，事件词汇表 V=2）**：遮盖（§6）。lite-context 的 `fit()` + `MaskToolResults` 在每次模型调用前、压缩前决定把哪些旧
+  的 tool 结果换成占位文字，新事件 `tool_results_masked` 记下每条结果和显示的原文，投影照着替换，自己不加字。每个事件的 `v`
+  是它这种类型所属的版本：没开遮盖的 session 全是 `v=1`，v0.2.5 照样读（§4）。
+  验收：改之前给 40 个已有测试文件记了 sha256，改完只有两个变了，都是词汇表规定的——`test_vocabulary.py` 加了 V=2 的指纹（V=1 的
+  不动）、`test_events.py` 的"每种事件一个例子"加了新事件的例子；v0.2.5 写的一段真实 log（`tests/fixtures/v1_session.json`，含
+  压缩）读回来投影逐字相同；PG store 里遮过的 run 读回投影相同；557+ 测试全过。
+  变异检查：9 处里 4 处一开始没被抓到——"已经遮过的不再遮"和"tool 定义计入阈值"补了测试；"压缩之后的 state 不再用"是多余的
+  （`StaleState` 本来就会让它重新量），删了；"重放存下的切点"在短的 run 上看不出差别，review 量了长的：50 轮、阈值 2000 时有
+  state 3 次遮盖、没有 12 次（切点几乎每次都动，prompt cache 的前缀断掉），补了这个测试。
+  收尾 review（Codex 额度用完，Claude 子代理）找到并修掉（都先写了失败的测试）：`keep_last=0` 让最新的结果也被遮；`v=1` 的
+  遮盖事件被接受；结果对不上任何 call 的那一轮让投影崩溃（以前是一个空的结果）；`DoesNotFit`/`StaleState` 以外的 lite-context
+  错误会让 run 失败；每个事件都写 `v=2` 会让 v0.2.5 读不了没开遮盖的 session（改成按类型写）。
+  评测（规则 13，Ollama 由 owner 授权启动、用完停掉）：qwen3:8b greedy，12 个任务各 3 次。遮盖关 0.750（与 S5b 相同）；遮盖开
+  （900 token、保留最新一批）第一版 0.667——skill 任务 3/3 → 0/3，`load_skill` 的结果（skill 的正文）被遮掉了；于是加了
+  `keep_tools`（默认 `load_skill`、`recall`，这些结果从不遮），重跑 0.750，但这一次遮盖一次都没触发（任务太短）：它说明的是
+  "不再伤害"，不是"有好处"。长 run 上的好处由脚本化的测试说明。KB 卡片 `global/llm-evals/evals/2026-11-26-lite-agent-masking.md`。
+  没解决：一个 Temporal 测试（`test_continue_as_new_carries_a_paused_run_on`）在这个分支的全套测试里偶发 RPC 超时（约 36 次里 4 次，
+  都在早期、评测同时在跑时），单独跑和不带 `test_masking.py` 时都不出现，main 上 18 次都没出现；把 `lite_context` 加进 Temporal
+  沙箱的 passthrough（本来就该加）之后 8 次都过。原因没确定。
 
 ## 16. 待确认
 

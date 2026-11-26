@@ -21,10 +21,10 @@ in a synthetic shop on lite-eval; the baseline on local qwen3 models is in desig
 From the GitHub Release (lite-agent is not on PyPI; it brings lite-model 0.8.0 along):
 
 ```
-uv add "lite-agent @ https://github.com/ArthurGao/lite-agent/releases/download/v0.2.4/lite_agent-0.2.4-py3-none-any.whl"
-uv add "lite-agent[pg] @ https://github.com/ArthurGao/lite-agent/releases/download/v0.2.4/lite_agent-0.2.4-py3-none-any.whl"     # + the PostgreSQL session store and the liteagent CLI
-uv add "lite-agent[server] @ https://github.com/ArthurGao/lite-agent/releases/download/v0.2.4/lite_agent-0.2.4-py3-none-any.whl"  # + the HTTP shell (liteagent serve)
-uv add "lite-agent[temporal,pg] @ https://github.com/ArthurGao/lite-agent/releases/download/v0.2.4/lite_agent-0.2.4-py3-none-any.whl"   # + durable runs, the inbox and timers
+uv add "lite-agent @ https://github.com/ArthurGao/lite-agent/releases/download/v0.3.0/lite_agent-0.3.0-py3-none-any.whl"
+uv add "lite-agent[pg] @ https://github.com/ArthurGao/lite-agent/releases/download/v0.3.0/lite_agent-0.3.0-py3-none-any.whl"     # + the PostgreSQL session store and the liteagent CLI
+uv add "lite-agent[server] @ https://github.com/ArthurGao/lite-agent/releases/download/v0.3.0/lite_agent-0.3.0-py3-none-any.whl"  # + the HTTP shell (liteagent serve)
+uv add "lite-agent[temporal,pg] @ https://github.com/ArthurGao/lite-agent/releases/download/v0.3.0/lite_agent-0.3.0-py3-none-any.whl"   # + durable runs, the inbox and timers
 ```
 
 ## Example
@@ -61,6 +61,13 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+### Keeping long runs small
+
+`masking=ToolResultMasker(context_tokens={"agent": 100_000}, keep_last=3)` shows old tool results as a placeholder
+once a request passes 90% of the role's threshold (lite-context decides; a `tool_results_masked` event records
+what was masked), before any summary is needed. `compaction=SummaryCompactor(...)` then summarises what masking
+cannot make small enough. Both are off unless given.
 
 ## Over HTTP
 
