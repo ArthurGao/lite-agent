@@ -112,6 +112,8 @@ uv run --env-file .env pytest    # everything; PostgreSQL tests need LITEAGENT_T
 uv run pytest -m ollama          # opt-in: real local Ollama
 uv run lite-eval run eval/lite-eval/suites/agent-fake.yaml     # the eval on the fake (deterministic)
 uv run lite-eval run eval/lite-eval/suites/agent-ollama.yaml   # S5b baseline: local Ollama, slow
+uv run lite-eval run eval/lite-eval/suites/agent-long-fake.yaml    # long tasks: compaction vs masking, fake (CI)
+uv run lite-eval run eval/lite-eval/suites/agent-long-ollama.yaml  # the same on local Ollama, about 25 minutes
 uv run ruff check && uv run ruff format --check && uv run mypy
 uv run liteagent migrate | sessions | show <id> [--json] | fork <id> --at <seq> | config   # needs `pg`
 uv run liteagent serve --agents agents.toml       # the HTTP shell, loopback :8730 (extra `server`)

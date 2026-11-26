@@ -1,0 +1,10 @@
+name: agent-long
+version: '2026-11-26'
+synthetic: true
+license: Apache-2.0
+description: 'Masking on long runs (lite-agent design §15): three tasks in a synthetic archive of
+  shipment reports (src/lite_agent/evals/archive.py), each about 1,250 characters with one status and
+  one gross weight buried in a scan log, each naming the next. A run reads a chain of twelve, one at a
+  time, then answers: two audits (count and total the delayed ones; English, Chinese) and a comparison
+  that needs the first report again at the end. Judged in code from the event log and the answer.
+  Fictional data only. Written from LONG_TASKS: a test keeps the two in step.'

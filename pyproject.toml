@@ -17,6 +17,7 @@ dependencies = [
     "pydantic==2.14.3",
     "pydantic-settings==2.16.2",
     "typer==0.27.3",  # the CLI; the same as lite-cache and lite-mem
+    "typing-extensions>=4.16.0",  # a TypeVar default (the eval tasks); pydantic's own floor
 ]
 
 [project.scripts]
@@ -71,6 +72,7 @@ select = ["E", "F", "W", "I", "UP", "B", "RUF"]
 # The eval tasks are half Chinese: full-width punctuation is their content, not a typo.
 "src/lite_agent/evals/*" = ["RUF001"]
 "tests/unit/test_eval_tasks.py" = ["RUF001"]
+"tests/unit/test_eval_long_tasks.py" = ["RUF001"]  # Chinese answers use full-width punctuation
 
 [tool.ruff.format]
 # Code blocks in docs are hand-aligned illustrations, not code.

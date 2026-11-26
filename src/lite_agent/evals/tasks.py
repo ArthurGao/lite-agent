@@ -4,15 +4,17 @@ path for lite-model's fake (the deterministic run in CI). Metrics come from the 
 what the model says about itself."""
 
 import dataclasses
+import json
 import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Generic, Literal, Protocol
 
 from lite_model import AssistantTurn, AsyncToolModel, Text, ToolCall
+from typing_extensions import TypeVar
 
 from lite_agent.agent import Agent
 from lite_agent.budget import Budget, spent
@@ -29,13 +31,11 @@ from lite_agent.events import (
     ToolStarted,
     UserMessage,
 )
+from lite_agent.projection import masks
 from lite_agent.result import RunResult
+from lite_agent.tools import Tool
 
 SKILLS = Path(__file__).parent / "skills"
-SYSTEM = (
-    "You are a support agent for a small shop. Use the tools to look things up and to act; "
-    "never guess an id, an amount or a status. Answer the user briefly, in the user's language."
-)
 
 
 @dataclass(frozen=True)
@@ -44,22 +44,37 @@ class Verdict:
     why: str  # what was missing, or "done"
 
 
-Check = Callable[[World, Sequence[Event], str], Verdict]
+class Place(Protocol):
+    """Where a task runs, rebuilt for every run: the agent's instructions and tools there, and
+    what the tools changed for the task's check to read."""
+
+    @property
+    def system(self) -> str: ...
+
+    def tools(self) -> tuple[Tool, ...]: ...
+
+
+# A task's place: the S5 shop by default, the archive for the long tasks (archive.py).
+P = TypeVar("P", bound=Place, default=World)
 
 
 @dataclass(frozen=True)
-class Task:
+class Task(Generic[P]):
     id: str
     lang: Literal["en", "zh"]
-    kind: Literal["lookup", "chain", "act", "recover", "no_tool", "skill", "long", "done"]
+    kind: Literal[
+        "lookup", "chain", "act", "recover", "no_tool", "skill", "long", "done", "audit", "compare"
+    ]
     prompt: str
-    check: Check
+    check: Callable[[P, Sequence[Event], str], Verdict]  # reads the place and the log afterwards
     script: tuple[AssistantTurn, ...]  # the fake's correct path
+    place: Callable[[], P]
     summary: str | None = None  # the fake's compaction summary, for a task that compacts
     compact_at: int | None = None  # estimated tokens before a summary is written
     skills: bool = False
     # The task's completion condition (Agent.done): None when done, else what is still open.
-    done: Callable[[World, Sequence[Event]], str | None] | None = None
+    done: Callable[[P, Sequence[Event]], str | None] | None = None
+    turns: int = 16  # the run's turn budget
 
 
 @dataclass(frozen=True)
@@ -78,6 +93,11 @@ class Metrics:
     input_tokens: int  # every billed call: turns, summaries, failed calls; unknown counts as 0
     output_tokens: int
     unknown_usage: int  # billed calls whose token counts the endpoint did not report
+    rereads: (
+        int  # calls repeating an earlier call's tool and arguments (a masked result read again)
+    )
+    masked: int  # tool results shown as a placeholder (design §6)
+    answer: str  # the run's final text, kept so a run can be judged again
     seconds: float
 
     def as_dict(self) -> dict[str, Any]:
@@ -86,10 +106,10 @@ class Metrics:
 
 @dataclass(frozen=True)
 class TaskRun:
-    task: Task
+    task: Task[Any]
     result: RunResult
     events: tuple[Event, ...]
-    world: World
+    world: Place
     metrics: Metrics = field(repr=False)
 
 
@@ -185,6 +205,7 @@ def _long_script() -> tuple[AssistantTurn, ...]:
 TASKS: tuple[Task, ...] = (
     Task(
         id="lookup-en",
+        place=World,
         lang="en",
         kind="lookup",
         prompt="What is the status of order A17?",
@@ -199,6 +220,7 @@ TASKS: tuple[Task, ...] = (
     ),
     Task(
         id="lookup-zh",
+        place=World,
         lang="zh",
         kind="lookup",
         prompt="订单 D03 现在是什么状态？",
@@ -210,6 +232,7 @@ TASKS: tuple[Task, ...] = (
     ),
     Task(
         id="chain-en",
+        place=World,
         lang="en",
         kind="chain",
         prompt="How much has the customer with the email bo@example.com spent in total on "
@@ -229,6 +252,7 @@ TASKS: tuple[Task, ...] = (
     ),
     Task(
         id="chain-zh",
+        place=World,
         lang="zh",
         kind="chain",
         prompt="邮箱是 wang.fang@example.cn 的客户，有哪个订单被取消了？请给出订单号。",
@@ -244,6 +268,7 @@ TASKS: tuple[Task, ...] = (
     ),
     Task(
         id="act-en",
+        place=World,
         lang="en",
         kind="act",
         prompt="Refund order B03 in full.",
@@ -260,6 +285,7 @@ TASKS: tuple[Task, ...] = (
     ),
     Task(
         id="act-zh",
+        place=World,
         lang="zh",
         kind="act",
         prompt="给订单 A18 退款 3 元，只退一次。",
@@ -275,6 +301,7 @@ TASKS: tuple[Task, ...] = (
     ),
     Task(
         id="recover-en",
+        place=World,
         lang="en",
         kind="recover",
         prompt="Ana (ana@example.com) asks about her order 17. What is its status?",
@@ -291,6 +318,7 @@ TASKS: tuple[Task, ...] = (
     ),
     Task(
         id="no-tool-en",
+        place=World,
         lang="en",
         kind="no_tool",
         prompt="Our returns window is 30 days from delivery. A customer asks how long they have to "
@@ -303,6 +331,7 @@ TASKS: tuple[Task, ...] = (
     ),
     Task(
         id="no-tool-zh",
+        place=World,
         lang="zh",
         kind="no_tool",
         prompt="本店工作日 9 点到 18 点有人工客服。客户问几点可以找到人工客服？只根据这句话回答。",
@@ -314,6 +343,7 @@ TASKS: tuple[Task, ...] = (
     ),
     Task(
         id="skill-zh",
+        place=World,
         lang="zh",
         kind="skill",
         prompt="王芳的订单 D01（茶具套装）已经拆封了，她想退货。请按退款政策处理并告诉她退了多少。",
@@ -339,6 +369,7 @@ TASKS: tuple[Task, ...] = (
     ),
     Task(
         id="long-en",
+        place=World,
         lang="en",
         kind="long",
         prompt="Rule for this task: leave out every order whose amount is above 100. Start with "
@@ -357,6 +388,7 @@ TASKS: tuple[Task, ...] = (
     ),
     Task(
         id="done-en",
+        place=World,
         lang="en",
         kind="done",
         prompt="Bo (bo@example.com) asked whether the office chair, SKU CHAIR-2, is back in stock. "
@@ -392,7 +424,7 @@ BY_ID = {t.id: t for t in TASKS}
 
 
 def metrics(
-    task: Task, world: World, result: RunResult, events: Sequence[Event], seconds: float
+    task: Task[P], world: P, result: RunResult, events: Sequence[Event], seconds: float
 ) -> Metrics:
     answer = result.text or ""
     verdict = task.check(world, events, answer)
@@ -418,32 +450,45 @@ def metrics(
         input_tokens=sum(u.input or 0 for u in billed),
         output_tokens=sum(u.output or 0 for u in billed),
         unknown_usage=sum(1 for u in usages if u is None or u.input is None or u.output is None),
+        rereads=_rereads(events),
+        masked=len(masks(events)),
+        answer=answer,
         seconds=round(seconds, 3),
     )
 
 
-def build_agent(task: Task, world: World, model: AsyncToolModel, **fields: Any) -> Agent:
-    """The agent a task runs with: the shop's tools, the skills when the task needs them, a
+def _rereads(events: Sequence[Event]) -> int:
+    seen: set[str] = set()
+    again = 0
+    for c in calls(events):
+        key = json.dumps([c.name, c.arguments], sort_keys=True)
+        again += key in seen
+        seen.add(key)
+    return again
+
+
+def build_agent(task: Task[P], world: P, model: AsyncToolModel, **fields: Any) -> Agent:
+    """The agent a task runs with: its place's tools, the skills when the task needs them, a
     summary before `compact_at` estimated tokens, the task's completion condition."""
     done = task.done
     return Agent(
         role="agent",
         model=model,
-        system=SYSTEM,
+        system=world.system,
         tools=world.tools(),
         skills=SkillDir(SKILLS) if task.skills else None,
         compaction=SummaryCompactor(context_tokens={"agent": task.compact_at}, keep_turns=2)
         if task.compact_at
         else None,
         done=(lambda events: done(world, events)) if done else None,
-        budget=Budget(turns=16),
+        budget=Budget(turns=task.turns),
         **fields,
     )
 
 
-async def run_task(task: Task, model: AsyncToolModel, **fields: Any) -> TaskRun:
-    """Run one task on a fresh shop; `fields` reach `Agent` (a store, a clock, ids)."""
-    world = World()
+async def run_task(task: Task[P], model: AsyncToolModel, **fields: Any) -> TaskRun:
+    """Run one task in a fresh place; `fields` reach `Agent` (a store, a clock, ids)."""
+    world = task.place()
     agent = build_agent(task, world, model, **fields)
     started = time.perf_counter()
     result = await agent.run(task.prompt)

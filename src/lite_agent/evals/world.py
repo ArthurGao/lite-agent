@@ -3,13 +3,18 @@ same data for every task, and the tools the agent reaches it with. Pure Python: 
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field
 
 from lite_agent.tools import Tool, ToolContext, tool
 
 Status = Literal["processing", "shipped", "delivered", "cancelled"]
+
+SYSTEM = (
+    "You are a support agent for a small shop. Use the tools to look things up and to act; "
+    "never guess an id, an amount or a status. Answer the user briefly, in the user's language."
+)
 
 
 @dataclass(frozen=True)
@@ -106,6 +111,7 @@ class NoteArgs(BaseModel):
 class World:
     """One task's shop. What the tools changed is here for the task's check to read."""
 
+    system: ClassVar[str] = SYSTEM  # the agent's instructions in the shop
     customers: dict[str, Customer] = field(default_factory=lambda: {c.id: c for c in CUSTOMERS})
     orders: dict[str, Order] = field(default_factory=lambda: {o.id: o for o in ORDERS})
     stock: dict[str, int] = field(default_factory=lambda: dict(STOCK))

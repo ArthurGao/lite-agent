@@ -1,0 +1,3 @@
+{"id": "audit-en", "input": {"task": "audit-en"}, "expected": {"done": true}, "tags": {"lang": "en", "kind": "audit"}}
+{"id": "audit-zh", "input": {"task": "audit-zh"}, "expected": {"done": true}, "tags": {"lang": "zh", "kind": "audit"}}
+{"id": "compare-en", "input": {"task": "compare-en"}, "expected": {"done": true}, "tags": {"lang": "en", "kind": "compare"}}
