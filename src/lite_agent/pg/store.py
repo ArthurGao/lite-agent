@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any
 
 from psycopg import AsyncConnection, AsyncCursor, sql
+from psycopg.errors import UniqueViolation
 from psycopg_pool import AsyncConnectionPool
 from pydantic import TypeAdapter
 
@@ -73,7 +74,10 @@ class PgSessionStore:
             "SELECT s.parent_id, s.fork_seq,"
             " (SELECT max(seq) FROM {} WHERE session_id = s.id) FROM {} s WHERE s.id = %s"
         ).format(events, sessions)
-        self._lock = self._head + sql.SQL(" FOR UPDATE OF s")
+        # The lock is a statement of its own: under READ COMMITTED a row lock that had to wait
+        # re-checks that row but not a subquery, so a `max(seq)` read in the same statement is
+        # the tail from before the other writer committed (found under load, 2026-11-26).
+        self._lock = sql.SQL("SELECT 1 FROM {} WHERE id = %s FOR UPDATE").format(sessions)
         self._insert = sql.SQL(
             "INSERT INTO {} (session_id, seq, type, v, data) VALUES (%s, %s, %s, %s, %s)"
         ).format(events)
@@ -146,8 +150,12 @@ class PgSessionStore:
     async def _head_of(
         self, cur: AsyncCursor[Any], session_id: str, *, lock: bool = False
     ) -> tuple[Any, ...] | None:
-        """(parent_id, fork_seq, tail) of a session, or None when there is none."""
-        await cur.execute(self._lock if lock else self._head, (session_id,))
+        """(parent_id, fork_seq, tail) of a session, or None when there is none. With `lock`,
+        the session's row is held to the end of the transaction first, and the tail is read
+        after it: a new statement sees what a writer that held the lock before committed."""
+        if lock:
+            await cur.execute(self._lock, (session_id,))
+        await cur.execute(self._head, (session_id,))
         row = await cur.fetchone()
         if row is None:
             return None
@@ -168,7 +176,13 @@ class PgSessionStore:
             check_batch(session_id, events, tail=tail)
             if events:
                 rows = [(session_id, e.seq, e.type, e.v, json.dumps(dump(e))) for e in events]
-                await cur.executemany(self._insert, rows)
+                try:
+                    await cur.executemany(self._insert, rows)
+                except UniqueViolation:  # another writer took these seqs: the same conflict
+                    raise SeqConflict(
+                        f"session {session_id}: seqs {expected_seq + 1}-{expected_seq + len(rows)}"
+                        " overlap what another writer took"
+                    ) from None
 
     async def read(
         self, session_id: str, *, after_seq: int = 0, upto_seq: int | None = None

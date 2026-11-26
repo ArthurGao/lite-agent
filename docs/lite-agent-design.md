@@ -1,6 +1,6 @@
 # lite-agent 设计文档
 
-**状态：S1–S7 完成（2026-11-21）；v0.3.0（2026-11-26，事件词汇表 V=2）：用 lite-context 的 `fit()` 遮盖旧的 tool 结果（§6）；v0.2.5：压缩器改用 lite-context（§6、§13）；事件与投影、tool loop、`@tool`、预算、gate、暂停 / 恢复、`fallback_role`、skills、memory、压缩、PG session store、CLI、lite-eval target（S5）、HTTP 壳（S6）、Temporal runner 与 inbox / timer（S7）。v0.1.0（S5.5，事件词汇表 V=1 冻结）与 v0.2.0 已发布。P0 是 lite-model v0.4.0 的 `turn()`。仓库公开在 github.com/ArthurGao/lite-agent。第一个宿主：llm-steward 的 reconcile 排查助手（2026-11-21 owner 定，§16）。**
+**状态：S1–S7 完成（2026-11-21）；v0.3.1（2026-11-26）：PG store 并发写同一尾部时给 `SeqConflict`；v0.3.0（2026-11-26，事件词汇表 V=2）：用 lite-context 的 `fit()` 遮盖旧的 tool 结果（§6）；v0.2.5：压缩器改用 lite-context（§6、§13）；事件与投影、tool loop、`@tool`、预算、gate、暂停 / 恢复、`fallback_role`、skills、memory、压缩、PG session store、CLI、lite-eval target（S5）、HTTP 壳（S6）、Temporal runner 与 inbox / timer（S7）。v0.1.0（S5.5，事件词汇表 V=1 冻结）与 v0.2.0 已发布。P0 是 lite-model v0.4.0 的 `turn()`。仓库公开在 github.com/ArthurGao/lite-agent。第一个宿主：llm-steward 的 reconcile 排查助手（2026-11-21 owner 定，§16）。**
 与代码冲突时，在同一次改动里更新本文，并在 commit 里说明原因。
 
 ## 0. 决策记录
@@ -1171,6 +1171,16 @@ docs/lite-agent-design.md
   没解决：一个 Temporal 测试（`test_continue_as_new_carries_a_paused_run_on`）在这个分支的全套测试里偶发 RPC 超时（约 36 次里 4 次，
   都在早期、评测同时在跑时），单独跑和不带 `test_masking.py` 时都不出现，main 上 18 次都没出现；把 `lite_context` 加进 Temporal
   沙箱的 passthrough（本来就该加）之后 8 次都过。原因没确定。
+
+- **v0.3.1（2026-11-26）**：`PgSessionStore` 两个写者在同一个尾部时，等锁的那个拿到的是 PostgreSQL 的 `UniqueViolation` 而不是
+  `SeqConflict`（S4a 起就有，与遮盖无关；查 Temporal 偶发超时时在 CPU 满负载下用对照实验找到：改遮盖前后都会出现）。原因：锁和读尾部
+  是同一条语句 `SELECT … (SELECT max(seq) …) … FOR UPDATE OF s`——READ COMMITTED 下等到锁的语句只重查被锁的行，不重跑子查询，
+  读到的是别人提交前的尾部。修法：先单独一条 `SELECT 1 … FOR UPDATE` 拿锁，再用新的一条语句读尾部（新语句能看到对方已提交的写）；
+  另加兜底：插入时撞到 `events_pkey` 也报 `SeqConflict`（只可能是没拿到锁的写者）。数据从来没坏过：主键挡住了第二次写，错的只是异常的
+  类型——HTTP 壳的冲突响应、跨进程续跑都靠 `SeqConflict`。测试：`test_pg_store.py` 让第二个写者在锁上等（按 `pg_blocking_pids` 认），
+  第一个提交后断言它是尾部检查给的 `SeqConflict`（换回旧语句必失败，兜底也救不了这条断言）；兜底另有一条测试。满负载下契约测试 20 次全过
+  （修之前第 1 次就复现）；review 的压力脚本每轮 8 个写者，新 session、已有尾部、fork 各几十轮，每轮恰好一个成功。
+  Temporal 的偶发超时：满负载下改遮盖前后各 12 次都没出现，CPU 不足的假设不成立；仍记作未解决，CI 再出现时再查。
 
 ## 16. 待确认
 
