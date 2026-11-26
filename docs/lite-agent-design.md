@@ -387,6 +387,10 @@ class Runner(Protocol):                         # where the loop's steps execute
   在 lite-context 里把装着它们的那条消息标成 pinned。Ollama 评测里没有这条时，qwen3:8b 的 skill 任务从 3/3 掉到 0/3
   （§15 阶段记录）。压缩之后存的 `state` 对不上（`StaleState`），重新量；读不出的 `state`（更新版本的
   lite-context 写的）也重新量。两个都配时压缩的阈值应不低于遮盖的。估算不算 thinking block（与渲染一样）。
+  **什么时候开**（长任务评测，§15 阶段记录 2026-11-26）：默认关，保持关。遮盖省输入 token（−32%）和时间（−57%），
+  但 qwen3:8b 从不照占位符重读被遮的结果（9 次 0 次），只按还看得见的最后一两份作答，看不见的就编（第一份的毛重 43.6
+  答成 7.5）；摘要压缩留住了早先的事实（45 个里 22 个对 9 个，第一份的毛重 3/3 对 0/3）。只在旧结果读过一次就用完的
+  任务上开（查找、逐条处理、答案只依赖最近的结果），并且先在宿主自己的任务上量。
 - **压缩**（S3b；`Compactor` 协议：`check(roles)`、`due(projection, role)`、`cut(events)`、`prompt(history)`）。
   2026-11-26 起提问、渲染和摘要外框来自 lite-context（§13）：`render()` 把历史映射成 lite-context 的中立消息
   （`neutral.to_neutral`）再用它的 `render_transcript`；`frame(reply)` 用 lite-context 的 `SUMMARY` 包住回复，去掉抄回来的
@@ -1182,6 +1186,46 @@ docs/lite-agent-design.md
   （修之前第 1 次就复现）；review 的压力脚本每轮 8 个写者，新 session、已有尾部、fork 各几十轮，每轮恰好一个成功。
   Temporal 的偶发超时：满负载下改遮盖前后各 12 次都没出现，CPU 不足的假设不成立；仍记作未解决，CI 再出现时再查。
 
+- **长任务上的遮盖（2026-11-26，评测代码，没有发布）**：S5 的 12 个任务里遮盖从没真正触发（结果是一行、最长 8 次查找），
+  所以另做了一个合成世界 `evals/archive.py`：36 份约 1,250 字符的运单报告，每份埋着一个状态和一个毛重，并写着下一份的编号；
+  三个任务各读一串 12 份：`audit-en` / `audit-zh`（数 delayed 的票数、合计它们的毛重）和 `compare-en`（读完后给出**第一份**和
+  最后一份的毛重、两者差多少——专门测遮盖的风险：第一份到最后早已被遮）。数据集 `agent-long`，套件 `agent-long-fake.yaml`
+  （CI）/ `agent-long-ollama.yaml`。阈值在 fake 上标定，让两种配置各自真正起作用：只压缩（3,000 估算 token 处写摘要，每个任务
+  恰好一次）对比先遮盖（2,000 处遮，保留最新 2 批；每个任务遮 9 条、不再需要摘要）。这两个阈值故意比 qwen3:8b 在这台机器上的
+  上下文（Ollama 0.40.15 给的 32,768）低得多：模拟紧的预算，不是截断。`Metrics` 加了 `rereads`（同一 tool 同样参数再调一次）、
+  `masked`（被遮的结果数，`projection.masks()`）和 `answer`（最后的回答，留着以后重新判）。`Task` 变成以它的场所为参数的泛型
+  （`Task[World]` / `Task[Archive]`，`typing_extensions` 的 TypeVar 默认值，依赖里写明 `typing-extensions>=4.16.0`，即
+  pydantic 自己的下限），system prompt 由场所给出；S5 的 12 个任务行为不变（fake 上 1.000、13 次调用，原有测试文件逐字节不变）。
+  被测的数据（报告、system prompt、三个 prompt）用一个哈希钉在测试里：要改就是新的一次测量。
+  **两次 Ollama 运行**（owner 授权启动、跑完停掉；qwen3:8b greedy、关 thinking，每个任务每种配置 3 次）。第一次的判定有错
+  （close-out 审查发现）：`compare-en` 当时问"哪个重"，判定只看答案里有没有出现 `T01`，两个 id 都提到的答案无论对错都算对；
+  `43.6kg`（数字后紧跟 kg）和 "eight" 这样的写法算错；答案也没存下来，没法重判。修了判定（`compare-en` 改问差值，三个条件都是
+  数；重量接受 `kg` 连写和两位小数，票数接受英文词和中文数字），`Metrics` 加 `answer`，重跑。第一次的数（只压缩 3/9、
+  先遮盖 0/9、输入 token、用时）作废，只留在 git 历史里。第二次：
+
+  | 配置 | 完成 | 输入 token / run | 用时中位数 | 摘要 | 被遮 | 重读 | audits：真 delayed 的毛重答对 | compare：第一份毛重对 |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | 只压缩 | 0/9 | ≈34.2k（读满 12 份的 run） | 78 s | 9/9 次 run | 0 | 0 | **22/45** | **3/3** |
+  | 先遮盖 | 0/9 | ≈23.2k（−32%） | 34 s（−57%） | 0 | 9 / run | **0** | **9/45** | **0/3** |
+
+  完成率两边都是 0，分不开；分开它们的是**哪些事实留下了**——这一列是事后用脚本从存下的回答里算的
+  （`scripts/long_eval_facts.py`），不是事先定的指标。读法：（1）遮盖开时模型只按还看得见的最后一两份作答（`keep_last=2`）：
+  audit-en 三次都只说出 1 票（最后一份 R12），compare-en 三次都把第一份 43.6 kg 编成 7.5 kg；9 次 run 一次都没照占位符
+  `[result cleared to save context; call read_report again if you need it]` 重读。（2）只压缩时摘要留住了早先的事实
+  （audit-en 有两次 8 票的 id 和毛重全对，compare-en 第一份毛重 3/3），失败在 qwen3:8b 自己的计数和算术（列出 8 个 id 却说
+  "5 票"；差值算成 16.7）和摘要后丢了在链上的位置（2 次把 T07 当成最后一份，2 次 run 读到第 10、第 8 份就停了）。结论写进 §6：
+  默认关，只在旧结果读过一次就用完的任务上开。限度：合成任务、一个模型、每格 3 次（greedy，遮盖开的三次几乎一样）；
+  没有量 prompt cache。没做的（§16）：更有信息的占位符、更强的模型。KB 卡片
+  `global/llm-evals/evals/2026-11-26-lite-agent-masking-long.md`。
+  收尾：`/simplify`（四个角度）采纳了泛型 `Task`、system prompt 归场所、长任务一个构造函数、`masked` 用 `masks()`、测试里
+  一个 `fake()`；没采纳：`_kg` 的 `.0` 分支是死代码（合计可以以 .0 结尾）、测试里独立重算答案（故意不用被测代码算）、
+  `Report.next_id` 多余（测试用它核对链）、每个世界一个 `kind`（一个共享词汇表让数据集标签受检）。正确性审查（Codex 额度用完，
+  由一个 Claude 子代理做）：判定的三个问题（上面）修了，先写失败的测试；报告长度的注释改成 1,250；`rereads` 不认大小写不同的
+  同一 id、会把出错后的重试算进去——只是一个指标，留着；评测缓存的身份不含 lite-context 的版本（遮盖和压缩用它的估算）——
+  这是早就有的缺口，改它要动 S5 钉住 `versions()` 的那条测试，单独做（§16）；两次运行都没有命中缓存。一次 mutation 检查
+  留下了过期的字节码（同样大小的改动、同一秒内还原，Python 认 mtime 和大小，继续跑变异体），让钉数据的测试在审查时失败；
+  删掉 `.pyc` 后通过，之后的 mutation 检查都带 `PYTHONDONTWRITEBYTECODE=1`。
+
 ## 16. 待确认
 
 - **很长的 session 的复制**（S4b Codex）：`copy_session` 把整个 session 读进内存、一批写入；分批而仍全有或全无
@@ -1213,4 +1257,10 @@ docs/lite-agent-design.md
   （只在 run 开始时）。模型调用是秒级，**不缓存投影，读取也不改成一条递归 CTE**；session 到几万个事件时再测。
 - **memory 与 llm-steward**：agent 写 memory 是直接用 lite-mem，还是必须经过 llm-steward 的治理。
 - ~~**HTTP 端口**~~：8730（S6 定，KB `global/machine/ports.md` 登记）。
+- **遮盖的占位符与重读**（长任务评测，2026-11-26）：qwen3:8b 不照占位符重读（9 次 0 次），看不见的事实就编。值得试：
+  占位符带上结果里模型可能还要的东西（lite-context 的占位符是固定常量，§5.2 规则 6，要改得在那边改并配评测），或换更强的
+  模型再量。qwen3:8b 在 12 份上数不准、算不对，要让完成率分开两种配置，需要更短的链或更强的模型。
+- **评测缓存的身份不含 lite-context**（长任务评测的 close-out 审查）：`AgentTarget.versions()` 只有 lite-agent、lite-model 和
+  代码哈希；遮盖和压缩用 lite-context 的估算（v0.3.2 重新校准过），升级 lite-context 后可能拿到旧的缓存结果。加上它要改 S5 的
+  `test_the_target_says_what_decides_its_output`（它钉住了键的集合），单独做。
 - **项目 KB 的位置**：提议 `KB/projects/lite-agent/`（S0 创建）；lite-cache 是放在仓库内 `kb/`。

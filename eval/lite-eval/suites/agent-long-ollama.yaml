@@ -1,0 +1,18 @@
+# Masking on long runs (design §15) on local Ollama: qwen3:8b greedy, thinking off (the S5b
+# baseline's main config), compaction alone vs masking first, the thresholds of
+# agent-long-fake.yaml. Three runs per task. Compare done, input tokens, summaries (compacted),
+# masked results and re-reads. Free but slow (about an hour): check nothing else is evaluating on
+# Ollama first (`pgrep -fl lite-eval`).
+#   uv run lite-eval run eval/lite-eval/suites/agent-long-ollama.yaml
+name: agent-long-ollama
+dataset: ../datasets/agent-long
+repeats: 3
+timeout_s: 1200
+concurrency: 1
+targets:
+  - python: lite_agent.eval_target:agent
+    configs:
+      - {name: qwen3-8b-compact, backend: ollama, model: "qwen3:8b", reasoning_effort: none}
+      - {name: qwen3-8b-masked, backend: ollama, model: "qwen3:8b", reasoning_effort: none, mask_at: 2000, mask_keep: 2}
+scorers:
+  - exact_match: {field: done, expected: done}

@@ -1,0 +1,14 @@
+# Masking on long runs (design §15) on lite-model's fake: the archive tasks with compaction alone
+# (a summary past 3,000 estimated tokens, on every task) and with masking first (past 2,000,
+# keeping the newest 2 batches; measured: 9 results masked per task and no summary).
+# Deterministic: the CI run of the two configs agent-long-ollama.yaml compares.
+#   uv run lite-eval run eval/lite-eval/suites/agent-long-fake.yaml
+name: agent-long-fake
+dataset: ../datasets/agent-long
+targets:
+  - python: lite_agent.eval_target:agent
+    configs:
+      - {name: fake-compact, backend: fake, model: fake}
+      - {name: fake-masked, backend: fake, model: fake, mask_at: 2000, mask_keep: 2}
+scorers:
+  - exact_match: {field: done, expected: done}

@@ -1,9 +1,10 @@
 """The S5 evaluation's lite-eval target (design §15; needs the `eval` extra).
 
-One case is one task of `lite_agent.evals.TASKS`, run on a fresh shop. The output is the run's
-metrics, read from its event log (`Metrics`); a scorer only reads `done`. The model is lite-model's
-fake replaying each task's scripted correct path (`backend: fake`, deterministic, the CI run) or a
-local Ollama model (`backend: ollama`, run several times per case)."""
+One case is one task of `lite_agent.evals.TASKS` (dataset agent) or of the long tasks
+(`lite_agent.evals.archive.LONG_TASKS`, dataset agent-long), run in a fresh place. The output is
+the run's metrics, read from its event log (`Metrics`); a scorer only reads `done`. The model is
+lite-model's fake replaying each task's scripted correct path (`backend: fake`, deterministic, the
+CI run) or a local Ollama model (`backend: ollama`, run several times per case)."""
 
 import hashlib
 from importlib.metadata import version
@@ -15,7 +16,9 @@ from lite_model import AsyncToolModel, ModelsConfig, RolePolicy, RoleSpec, build
 from lite_model.testing import AsyncFakeModel
 
 import lite_agent
-from lite_agent.evals.tasks import BY_ID, SYSTEM, TASKS, Task, run_task, say
+from lite_agent.evals.archive import LONG_BY_ID
+from lite_agent.evals.tasks import BY_ID, TASKS, Task, run_task, say
+from lite_agent.evals.world import SYSTEM
 from lite_agent.masking import ToolResultMasker
 
 if TYPE_CHECKING:
@@ -24,6 +27,10 @@ if TYPE_CHECKING:
 Backend = Literal["fake", "ollama"]
 Effort = Literal["none", "minimal", "low", "medium", "high"]  # lite-model's ReasoningEffort
 ROLES = RoleSpec({"agent": RolePolicy(), "compact": RolePolicy()})
+TASK_BY_ID: dict[str, Task[Any]] = {
+    **BY_ID,
+    **LONG_BY_ID,
+}  # the S5 set (dataset agent) and the long tasks (agent-long)
 
 
 def code_version() -> str:
@@ -107,7 +114,7 @@ class AgentTarget:
             )
             self._live = build_async(config, ROLES)
 
-    def _model(self, task: Task) -> AsyncToolModel:
+    def _model(self, task: Task[Any]) -> AsyncToolModel:
         if self._live is not None:
             return self._live
         summary = say(task.summary or "Summary.")
@@ -115,7 +122,7 @@ class AgentTarget:
 
     async def run(self, case: Case) -> Output:
         assert isinstance(case.input, dict)
-        task = BY_ID[str(case.input["task"])]
+        task = TASK_BY_ID[str(case.input["task"])]
         masking = (
             ToolResultMasker(context_tokens={"agent": self.mask_at}, keep_last=self.mask_keep)
             if self.mask_at is not None
