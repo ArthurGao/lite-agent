@@ -165,3 +165,69 @@ async def test_listing_sessions_needs_a_positive_limit(
             await store.sessions(limit)
     finally:
         await store.close()
+
+
+async def test_a_writer_that_waited_for_the_lock_sees_the_new_tail_and_is_refused(
+    pg_url: str, pg_schema: str
+) -> None:
+    """Two writers at one tail, made to meet every time: the second waits on the session's lock
+    while the first commits seq 2. It must then see that tail and get `SeqConflict`, not the
+    database's duplicate-key error (it read a stale `max(seq)` in the locking statement: under
+    READ COMMITTED a re-checked row lock does not re-run a subquery; found under load,
+    2026-11-26)."""
+    import asyncio
+
+    from lite_agent import SeqConflict
+    from lite_agent.events import dump
+
+    store = PgSessionStore(pg_url, schema=pg_schema)
+    await store.append("s1", [started()], expected_seq=0)
+    sessions, events = sql.Identifier(pg_schema, "sessions"), sql.Identifier(pg_schema, "events")
+    with psycopg.connect(pg_url) as holder, psycopg.connect(pg_url, autocommit=True) as watch:
+        holder.execute(sql.SQL("SELECT 1 FROM {} WHERE id = 's1' FOR UPDATE").format(sessions))
+        second = asyncio.create_task(store.append("s1", [said(2, "B")], expected_seq=1))
+        for _ in range(200):  # until the store's statement waits on this connection's lock
+            await asyncio.sleep(0.02)
+            waiting = watch.execute(
+                "SELECT count(*) FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid))",
+                (holder.info.backend_pid,),
+            ).fetchone()
+            if waiting and waiting[0]:
+                break
+        else:
+            pytest.fail("the store's append never waited on the session lock")
+        first = said(2, "A")
+        holder.execute(
+            sql.SQL(
+                "INSERT INTO {} (session_id, seq, type, v, data) VALUES (%s, %s, %s, %s, %s)"
+            ).format(events),
+            ("s1", 2, first.type, first.v, json.dumps(dump(first))),
+        )
+        holder.commit()
+        # refused by the tail check itself, not only by the duplicate-key backstop
+        with pytest.raises(SeqConflict, match="expected seq 1, tail is 2"):
+            await second
+    assert [e.seq for e in await store.read("s1")] == [1, 2]
+    assert (await store.read("s1"))[1] == first
+    await store.close()
+
+
+async def test_a_duplicate_seq_from_the_database_is_a_seq_conflict(
+    pg_url: str, pg_schema: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backstop: should a writer ever reach the insert with a stale tail (here its tail
+    read is made to say 1 after seq 2 was written), the database's duplicate-key error comes
+    out as the `SeqConflict` a host retries on, never as psycopg's own exception."""
+    from lite_agent import SeqConflict
+
+    store = await opened(pg_url, pg_schema)  # seqs 1 and 2
+
+    async def stale(*args: object, **kwargs: object) -> tuple[None, None, int]:
+        return None, None, 1
+
+    monkeypatch.setattr(store, "_head_of", stale)
+    with pytest.raises(SeqConflict, match="overlap what another writer took"):
+        await store.append("s1", [said(2, "late")], expected_seq=1)
+    monkeypatch.undo()
+    assert await store.read("s1") == [started(), said(2)]
+    await store.close()
