@@ -1260,7 +1260,7 @@ docs/lite-agent-design.md
 - **遮盖的占位符与重读**（长任务评测，2026-11-26）：qwen3:8b 不照占位符重读（9 次 0 次），看不见的事实就编。值得试：
   占位符带上结果里模型可能还要的东西（lite-context 的占位符是固定常量，§5.2 规则 6，要改得在那边改并配评测），或换更强的
   模型再量。qwen3:8b 在 12 份上数不准、算不对，要让完成率分开两种配置，需要更短的链或更强的模型。
-- **评测缓存的身份不含 lite-context**（长任务评测的 close-out 审查）：`AgentTarget.versions()` 只有 lite-agent、lite-model 和
-  代码哈希；遮盖和压缩用 lite-context 的估算（v0.3.2 重新校准过），升级 lite-context 后可能拿到旧的缓存结果。加上它要改 S5 的
-  `test_the_target_says_what_decides_its_output`（它钉住了键的集合），单独做。
+- ~~**评测缓存的身份不含 lite-context**~~（长任务评测的 close-out 审查）：2026-11-27 加上了。`AgentTarget.versions()` 现在有
+  lite-agent、lite-model、lite-context 和代码哈希；遮盖和压缩用 lite-context 的估算，升级它就是新的输出，不再命中旧缓存。
+  S5 的 `test_the_target_says_what_decides_its_output` 钉住键的集合，随之改了（owner 同意），并核对值就是装着的 lite-context 版本。
 - **项目 KB 的位置**：提议 `KB/projects/lite-agent/`（S0 创建）；lite-cache 是放在仓库内 `kb/`。

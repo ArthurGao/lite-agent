@@ -92,6 +92,8 @@ class AgentTarget:
         return {
             "lite-agent": version("lite-agent"),
             "lite-model": version("lite-model"),
+            # its estimates decide when masking and compaction engage (design §6)
+            "lite-context": version("lite-context"),
             "code": code_version(),
         }
 

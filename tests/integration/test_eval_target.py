@@ -3,6 +3,7 @@ load, and on lite-model's fake every task is done with the same metrics on every
 deterministic run in CI). One opt-in test runs a task on the real local Ollama."""
 
 import dataclasses
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -65,7 +66,10 @@ def test_the_target_says_what_decides_its_output() -> None:
         "temperature": None,
     }
     assert agent("ollama", "qwen3:8b", temperature=0.6).config()["temperature"] == 0.6
-    assert set(fake.versions()) == {"lite-agent", "lite-model", "code"}
+    # lite-context's estimates decide when masking and compaction engage: a new one is a new
+    # output, so it is part of the cache identity (design §16, long-task close-out)
+    assert set(fake.versions()) == {"lite-agent", "lite-model", "lite-context", "code"}
+    assert fake.versions()["lite-context"] == version("lite-context")
     assert fake.billing() == "free"
 
 
