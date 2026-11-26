@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 from lite_model import AssistantTurn, CallFailed, ModelError, ToolCall, Usage
 
 from lite_agent.budget import add_usage, spent
-from lite_agent.compaction import SUMMARY, Compactor, clean
+from lite_agent.compaction import Compactor, frame
 from lite_agent.errors import HarnessError, SeqConflict, StoreError, UnknownSession, UnresolvedCalls
 from lite_agent.events import (
     Compaction,
@@ -397,7 +397,7 @@ class _Run:
             error = RunError("model", type(exc).__name__)
             return await self.finish("failed", "error", error=error)
         self.usage = add_usage(self.usage, reply.usage)
-        summary = clean(reply.turn.text)
+        summary = frame(reply.turn.text)  # framed as the model is shown it; "" when nothing is left
         if reply.stop == "length" or not summary:
             # half a summary, or none, must not stand for the whole history: the call is recorded
             # as a failed one (it was billed) and the run ends, as for any summary not written
@@ -415,7 +415,7 @@ class _Run:
         await self.append(
             partial(
                 Compaction,
-                summary=SUMMARY.format(summary=summary),
+                summary=summary,
                 covers=(first, cut),
                 role=agent.compact_role,
                 provenance=provenance_data(reply.provenance),

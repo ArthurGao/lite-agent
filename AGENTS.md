@@ -42,7 +42,8 @@ baseline (qwen3:8b 0.750, with thinking 0.889; qwen3:1.7b 0.417) and the timings
 (`liteagent serve`, extra `server`) and caller-named runs (`run_id`). **S7a done 2026-11-21** — the TemporalRunner (a run as an
 activity, `AgentWorkflow`, `liteagent worker`; extra `temporal`). **S7b done 2026-11-21** — the inbox and timers for always-on
 agents (PostgreSQL tables, `InboxWorkflow`, `TimerWorkflow`, `enqueue`). S7 is complete.
-**v0.2.4 (2026-11-22): lite-model 0.8.0. v0.2.3: lite-model 0.7.0. v0.2.2: lite-model 0.6.0. v0.2.1: lite-model 0.5.1, so a host can install lite-agent beside lite-cache 0.3.0 (one lite-model). v0.2.0 released 2026-11-21** (S6 and S7; the event vocabulary is still V=1).
+**v0.2.5 (2026-11-26, lite-context C7): the compactor renders and frames summaries through lite-context
+0.3.1 (byte for byte what v0.2.4 sent; the cut, the event and the projection unchanged).** **v0.2.4 (2026-11-22): lite-model 0.8.0. v0.2.3: lite-model 0.7.0. v0.2.2: lite-model 0.6.0. v0.2.1: lite-model 0.5.1, so a host can install lite-agent beside lite-cache 0.3.0 (one lite-model). v0.2.0 released 2026-11-21** (S6 and S7; the event vocabulary is still V=1).
 
 ## Rules
 
@@ -75,9 +76,11 @@ agents (PostgreSQL tables, `InboxWorkflow`, `TimerWorkflow`, `enqueue`). S7 is c
    automatic fallback chain. Every `model_turn` event stores provenance and usage. The one exception is an
    explicit `fallback_role` (design §5 rule 11): off by default, only after `CallFailed`, once per run,
    written to the log as `model_switched`, never a LiteLLM router alias or Proxy `fallbacks`.
-8. **lite-model is the only run-time dependency among the sibling projects.** PostgreSQL, MCP, lite-mem,
-   lite-rag, lite-eval, Temporal and FastAPI are extras; the core (`events`, `projection`, `loop`,
-   `agent`) imports none of them. No sibling imports lite-agent.
+8. **lite-model and lite-context are the only run-time dependencies among the sibling projects**
+   (lite-context since 2026-11-26, owner's decision: its core has no dependencies; the compactor's prompt,
+   rendering and summary framing come from it, design §6). PostgreSQL, MCP, lite-mem, lite-rag, lite-eval,
+   Temporal and FastAPI are extras; the core (`events`, `projection`, `loop`, `agent`) imports none of
+   them. No sibling imports lite-agent.
 9. **One loop, with skills; no subagents** until a measurement says otherwise (design §0).
 10. **The CLI and the HTTP shell hold no logic**: they parse input and call `Agent`.
 11. **Tests never call a real model or a paid API.** Turns are scripted with lite-model's fakes;
@@ -88,13 +91,14 @@ agents (PostgreSQL tables, `InboxWorkflow`, `TimerWorkflow`, `enqueue`). S7 is c
 13. **Measure, don't guess**: a change to a loop rule, the compactor or a prompt comes with an eval run
     before and after (from S5).
 14. **Secrets only from environment variables.** Never commit `.env*` except `.env.example`.
-15. **Pinned dependencies**: lite-model as a release wheel; engine libraries (psycopg, the MCP SDK,
+15. **Pinned dependencies**: lite-model and lite-context as release wheels (direct URLs in the metadata); engine libraries (psycopg, the MCP SDK,
     temporalio) at exact versions. Never answer an MCP SDK / Temporal SDK / psycopg API question from
     memory: check context7 or the pinned version's docs.
 
 ## Tech stack
 
-Python 3.12, uv, pydantic / pydantic-settings, Typer, lite-model (every model call), pytest
+Python 3.12, uv, pydantic / pydantic-settings, Typer, lite-model (every model call), lite-context (the
+compactor's prompt and rendering), pytest
 (+ pytest-asyncio), ruff, mypy (strict). Extras: `pg` (psycopg 3), `eval`; on demand: `mcp`, `mem`, `rag`,
 `server` (FastAPI), `temporal`.
 

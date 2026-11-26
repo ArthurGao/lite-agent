@@ -281,9 +281,10 @@ wheels = [
 
 [[package]]
 name = "lite-agent"
-version = "0.2.4"
+version = "0.2.5"
 source = { editable = "." }
 dependencies = [
+    { name = "lite-context" },
     { name = "lite-model" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -318,6 +319,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", marker = "extra == 'server'", specifier = "==0.162.2" },
+    { name = "lite-context", url = "https://github.com/ArthurGao/lite-context/releases/download/v0.3.1/lite_context-0.3.1-py3-none-any.whl" },
     { name = "lite-eval", marker = "extra == 'eval'", url = "https://github.com/ArthurGao/lite-eval/releases/download/v0.4.1/lite_eval-0.4.1-py3-none-any.whl" },
     { name = "lite-model", url = "https://github.com/ArthurGao/lite-model/releases/download/v0.8.0/lite_model-0.8.0-py3-none-any.whl" },
     { name = "psycopg", extras = ["binary", "pool"], marker = "extra == 'pg'", specifier = "==3.3.8" },
@@ -338,6 +340,22 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1.0" },
     { name = "ruff", specifier = ">=0.8" },
 ]
+
+[[package]]
+name = "lite-context"
+version = "0.3.1"
+source = { url = "https://github.com/ArthurGao/lite-context/releases/download/v0.3.1/lite_context-0.3.1-py3-none-any.whl" }
+wheels = [
+    { url = "https://github.com/ArthurGao/lite-context/releases/download/v0.3.1/lite_context-0.3.1-py3-none-any.whl", hash = "sha256:e0fb7cb1df9473f5abd794478ce62e3aa00870fb6dd69a83ca2d1af5ce47531f" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", marker = "extra == 'server'", specifier = "==0.162.2" },
+    { name = "psycopg", extras = ["binary", "pool"], marker = "extra == 'pg'", specifier = "==3.3.8" },
+    { name = "uvicorn", marker = "extra == 'server'", specifier = "==0.54.0" },
+]
+provides-extras = ["pg", "server"]
 
 [[package]]
 name = "lite-eval"

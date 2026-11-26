@@ -1,6 +1,6 @@
 # lite-agent 设计文档
 
-**状态：S1–S7 完成（2026-11-21）：事件与投影、tool loop、`@tool`、预算、gate、暂停 / 恢复、`fallback_role`、skills、memory、压缩、PG session store、CLI、lite-eval target（S5）、HTTP 壳（S6）、Temporal runner 与 inbox / timer（S7）。v0.1.0（S5.5，事件词汇表 V=1 冻结）与 v0.2.0 已发布。P0 是 lite-model v0.4.0 的 `turn()`。仓库公开在 github.com/ArthurGao/lite-agent。第一个宿主：llm-steward 的 reconcile 排查助手（2026-11-21 owner 定，§16）。**
+**状态：S1–S7 完成（2026-11-21）；v0.2.5（2026-11-26）：压缩器改用 lite-context（§6、§13）；事件与投影、tool loop、`@tool`、预算、gate、暂停 / 恢复、`fallback_role`、skills、memory、压缩、PG session store、CLI、lite-eval target（S5）、HTTP 壳（S6）、Temporal runner 与 inbox / timer（S7）。v0.1.0（S5.5，事件词汇表 V=1 冻结）与 v0.2.0 已发布。P0 是 lite-model v0.4.0 的 `turn()`。仓库公开在 github.com/ArthurGao/lite-agent。第一个宿主：llm-steward 的 reconcile 排查助手（2026-11-21 owner 定，§16）。**
 与代码冲突时，在同一次改动里更新本文，并在 commit 里说明原因。
 
 ## 0. 决策记录
@@ -372,6 +372,12 @@ class Runner(Protocol):                         # where the loop's steps execute
 - 这三个内置 tool 排在宿主的 tool 之后，和宿主的 tool 走同一条路：校验、gate、超时、事件一样不少（所以宿主的
   gate 可以拦 `remember`）。与宿主的 tool 重名时构造 `Agent` 报错。
 - **压缩**（S3b；`Compactor` 协议：`check(roles)`、`due(projection, role)`、`cut(events)`、`prompt(history)`）。
+  2026-11-26 起提问、渲染和摘要外框来自 lite-context（§13）：`render()` 把历史映射成 lite-context 的中立消息
+  （`neutral.to_neutral`）再用它的 `render_transcript`；`frame(reply)` 用 lite-context 的 `SUMMARY` 包住回复，去掉抄回来的
+  头标行仍是这里的规则（任何 16 位以上十六进制的头标都去掉，不只这一次的；lite-context 只去这一次的）。历史不含 system
+  prompt（`projection.history`），传了 system 消息是 `ValueError`。切点按
+  `model_turn` 算、在事件 seq 上，仍是 `SummaryCompactor.cut` 的事；lite-context 的 `plan_compaction`（按人的轮次、
+  在带 key 的消息上）不用。
   不给 `compaction` 就不压缩，超出上下文是一次普通的模型失败。库里自带 `SummaryCompactor(context_tokens={role: n},
   keep_turns=6)`：
   - **什么时候**：每次模型调用之前、预算检查之后。把要发的请求按"字符数 ÷ 3.5"估成 token（消息文本、tool
@@ -588,7 +594,8 @@ tool 执行各一个 activity"（这一节原来的方向）。理由：
 
 | 项目 | 关系 |
 | --- | --- |
-| lite-model | **唯一的运行时依赖**（release wheel，≥ 0.4.0）。用它的 `AsyncToolModel.turn(role, messages, tools) -> TurnReply`（lite-model 设计 §3.1，2026-11-21 实现）：有序的 `AssistantTurn.blocks`；`ToolResults`；被截断的一轮**返回** `stop="length"` 和它的 call（§5 规则 1 靠它）；参数不是合法 JSON 对象时 `ToolCall.arguments is None`（当作 `invalid_args`）；`Opaque` 的跨协议规则在 adapter 里；`AsyncFakeModel.turn` 脚本化轮次。`turn()` 不经过 lite-model 的 hook。lite-model 不处理 preserved thinking 的历史检查，这里的投影负责（§4）；那种 400 现在是 `CallFailed`，与别的失败分不开（lite-model §15） |
+| lite-context | **运行时依赖**（release wheel，2026-11-26 起，owner 决定；它的核心没有依赖）。压缩器的提问（`ASK`、`END`）、摘要外框（`SUMMARY`）和 transcript 的渲染（`render_transcript`）用它的，逐字是 S3b 的原文（lite-context 当初就是从这里抄过去的）；切点、`compaction` 事件、投影仍在这里（§6）。lite-context 的 `fit()` / masking 没有接（C7 的范围只到压缩） |
+| lite-model | **运行时依赖**（release wheel，≥ 0.4.0）。用它的 `AsyncToolModel.turn(role, messages, tools) -> TurnReply`（lite-model 设计 §3.1，2026-11-21 实现）：有序的 `AssistantTurn.blocks`；`ToolResults`；被截断的一轮**返回** `stop="length"` 和它的 call（§5 规则 1 靠它）；参数不是合法 JSON 对象时 `ToolCall.arguments is None`（当作 `invalid_args`）；`Opaque` 的跨协议规则在 adapter 里；`AsyncFakeModel.turn` 脚本化轮次。`turn()` 不经过 lite-model 的 hook。lite-model 不处理 preserved thinking 的历史检查，这里的投影负责（§4）；那种 400 现在是 `CallFailed`，与别的失败分不开（lite-model §15） |
 | lite-cache | v1 不接（预期 L1 几乎不命中：每一轮上下文都不同；没有测过）。S5 的评测显示有重复调用时再定。评测本身必须绕过缓存 |
 | lite-mem | 可选 extra `mem`：`Memory` 的一个实现 |
 | lite-rag | 可选 extra `rag`：一个 `search_kb` tool |
@@ -1109,6 +1116,25 @@ docs/lite-agent-design.md
   Release：`https://github.com/ArthurGao/lite-agent/releases/download/v0.2.0/lite_agent-0.2.0-py3-none-any.whl`。
 - **P0 之后的修订（2026-11-21）**：按 lite-model 0.4.0 的实际接口和 Claude API 的 preserved thinking 规则改了
   §4（`model_turn` 存有序 blocks、`ToolResults` 分组、`Opaque` 进投影的条件）、§5 规则 4 和 11、§6、§13、§15、§16。
+
+- **lite-context C7（2026-11-26，v0.2.5）**：压缩器的提问、渲染和摘要外框改用 lite-context 0.3.1（owner 决定：lite-context
+  是核心依赖、只改压缩；规则 8、§6、§13 同步改了）。`SUMMARY` / `ASK` / `END` 从 `lite_context.compaction` 再导出，两边逐字
+  相同；`render()` = `render_transcript(mark, neutral.to_neutral(history))`（lite-context 为此加了公开的
+  `render_transcript`，不带结尾的 `END`——这里的测试按 `--- <mark> ` 数头标行）；`frame()` 用 `SUMMARY` 包住回复、去头标
+  的规则留在这里（`clean`：去掉任何 16 位以上十六进制头标，lite-context 只去这一次的）；loop 写 `compaction` 事件时用它。
+  没有自己的 `SummaryPolicy` 子类：这里不调 `plan_compaction` / `accept`，一个只为了覆盖 `wrap` 的子类是多余的（simplify）。切点
+  （按 `model_turn`、在事件 seq 上）、事件和投影不变：lite-context 的 `plan_compaction` 按人的轮次算，不适用；C7 要求的
+  "自己的轮次计法"就是保留 `cut`。估算的 3.5 字符 / token 取自 lite-context 的 `CharEstimate`，算法不变。
+  验收：改之前给 38 个已有测试文件记了 sha256，之后逐个相同，503 个测试一行没改全部通过；新加
+  `tests/unit/test_compaction_bytes.py`：用 v0.2.4 自己的代码先生成 10 种历史（并行调用、没解析的参数、错误结果、只有 thinking
+  的一轮、前面已有摘要、伪造头标、空文本、Unicode）的渲染结果和 5 种回复的外框结果当金标准，改完逐字节相同；
+  `tests/unit/test_neutral.py` 覆盖映射。只有 thinking 的一轮映射成一个空文本部分（v0.2.4 给它渲染一个空的 assistant 段；
+  lite-context 对空消息什么都不渲染）。变异 6 处都被抓到。规则 13：fake 评测改前改后相同（12 个任务全 1.000，13 次调用）；
+  发出去的字节已证明相同，Ollama 评测不必重跑。
+  收尾：`/simplify`（采纳：`frame()` 代替多余的 policy 子类、`_new_mark` 私有化、注明 `neutral` 不是通用 adapter）+ review
+  （Codex 额度用完，Claude 子代理）：用 hypothesis 生成 2 万段历史、5 千条回复，旧实现（`git show` 出来的 v0.2.4 代码）和新实现
+  逐字节相同；唯一的差别在公开的 `render()` 上传入 system 消息时——v0.2.4 渲染成一个 system 段，现在 `ValueError`；loop 永远
+  不会传（`projection.history` 不含 system），写进文档和测试。
 
 ## 16. 待确认
 
