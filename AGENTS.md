@@ -26,7 +26,7 @@ If a change must contradict the design, update the design in the same change and
 ## Current stage
 
 **S1 done 2026-11-21: events, the in-memory store, the projection, the loop and `Agent.run`** (design §3–§5;
-the rule → test table is in design §15 "阶段记录"). Public at github.com/ArthurGao/lite-agent since 2026-11-21;
+the rule → test table is in design §15 "Stage records"). Public at github.com/ArthurGao/lite-agent since 2026-11-21;
 CI runs there. S2 is done in three parts (design §15): **S2a done 2026-11-21** — `@tool` with
 Pydantic validation, result truncation, tool timeouts, token and cost budgets. **S2b done 2026-11-21** — gates, `paused` runs,
 `resume()` (approval, tools the host executes, calls an interrupted run left open). **S2c done 2026-11-21** —
@@ -126,7 +126,7 @@ uv run liteagent worker --agents agents.toml --task-queue q [--inbox --timers]  
    once (write it first, or break the line under test and watch it fail).
 2. Definition of done: ruff, ruff format, mypy, tests pass; acceptance items covered by tests; design
    updated if behaviour changed.
-3. Conventional Commits (`feat(loop): …`). All code-facing text in English. No commit without the
+3. Conventional Commits (`feat(loop): …`). All code-facing text and docs (design doc, README, plans, comments) in English; Chinese only as examples or test data. No commit without the
    owner's go-ahead for that commit; `git add <paths>` only.
 4. **Stage close-out — every stage, after its code passes the checks, before its commit and before the
    next stage starts:**
@@ -141,7 +141,7 @@ uv run liteagent worker --agents agents.toml --task-queue q [--inbox --timers]  
       matters: with a piped stdin `codex exec` waits for stdin to close and hangs in a background shell.
       If Codex is unavailable, say so; never skip silently.
    3. **Fix what holds up**: verify each finding before acting; a bug gets a failing regression test
-      first. A rejected finding is written down with a one-line reason (design §15 "阶段记录"), never
+      first. A rejected finding is written down with a one-line reason (design §15 "Stage records"), never
       silently dropped.
    4. **Re-run every check** (step 2) so they cover the final code. If step 3 changed code
       substantially, run steps 1 and 2 once more.
