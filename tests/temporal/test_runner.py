@@ -129,6 +129,15 @@ async def _paused(env: WorkflowEnvironment, runner: TemporalRunner, wid: str) ->
     raise AssertionError("the run never paused")
 
 
+async def _continued(env: WorkflowEnvironment, wid: str, first: str) -> None:
+    """Wait until workflow `wid` has continued as new from run `first` (describe, not a query)."""
+    for _ in range(60):
+        if (await env.client.get_workflow_handle(wid).describe()).run_id != first:
+            return
+        await env.sleep(1)
+    raise AssertionError("the workflow never continued as new")
+
+
 @activity.defn(name="lookup")
 async def lookup(arguments: dict[str, Any]) -> str:
     return f"found {arguments['q']}: an office chair"
@@ -236,6 +245,9 @@ async def test_continue_as_new_carries_a_paused_run_on(env: WorkflowEnvironment)
     async with make_worker(env.client, q, shop.registry):
         wid = await runner.start("payer", "Pay.", max_runs=0)  # continue as new at the first pause
         first = (await env.client.get_workflow_handle(wid).describe()).run_id
+        # the time-skipping test server drops a query that arrives while a run continues as new
+        # (it times out; a dev server answers it): query only once the new run is there
+        await _continued(env, wid, first)
         await _paused(env, runner, wid)
         await runner.decide(wid, approve={"c1": True})
         step = await runner.result(wid)

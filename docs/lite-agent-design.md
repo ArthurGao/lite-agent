@@ -1095,6 +1095,10 @@ docs/lite-agent-design.md
   - 测试抓到的 bug：从带过来的暂停开始的一段立刻又 Continue-As-New，无限接续（测试服务器报 http2 错误）；修成这一段执行过
     run 之后才会接续。
   - 测试里的一个坑：只发 query 不会推动 time-skipping 服务器的时钟，activity 重试的退避就一直等着；等暂停时用 `env.sleep`。
+  - 第二个坑（2026-11-27，偶发失败查清）：time-skipping 测试服务器会丢掉 Continue-As-New 那一刻到的 query——worker 报
+    "workflow execution already completed"，客户端约 30 s 后 `Timeout expired`。紧着发 query 时 20 次 20 次失败，Temporal CLI
+    的 dev server（Server 1.32.0）上 0 次，所以 `TemporalRunner.status` 本身没问题。Continue-As-New 那条测试先用 `describe`
+    等到新的 run 再 query（`_continued`）；把 `_paused` 改成不睡紧发时，没有它就失败、有它就通过。
   - 收尾 `/simplify`：采纳——Continue-As-New 用 `dataclasses.replace` 复制输入（以后加的字段不会被丢掉）；调用方错误的列表
     只写一处；`step_of` 用具体类型；`runner.py` 的说明改正（Temporal 不是 `Runner` 协议的实现）；测试里的 `Worker` 导入一次。
     记下不做：`ToolResultData` 与 `ToolOutcome` 合并、`Waiting` 带上 tool 名和参数（都改 §3 的接口）；`start()` 暴露超时、
