@@ -13,7 +13,9 @@ from pydantic.dataclasses import dataclass as record
 
 from lite_agent.errors import EventRejected
 
-V = 1  # the vocabulary version this code reads and writes
+V = 2  # the vocabulary version this code writes; it reads every version from 1 up to it
+# V=2 (2026-11-26) adds `tool_results_masked`; no V=1 event changed shape, so a V=1 log reads as
+# it was written (design §4).
 
 Outcome = Literal["completed", "failed", "paused"]
 StopReason = Literal[
@@ -116,7 +118,9 @@ class _Event(_Frozen):
     seq: int = Field(ge=1)
     time: datetime
     run_id: str
-    v: int = Field(default=V, ge=1, le=V)
+    # The vocabulary version the event's type belongs to (not the newest one): a session that
+    # never writes a V=2 type stays readable by a reader that only knows V=1.
+    v: int = Field(default=1, ge=1, le=V)
 
 
 class SessionStarted(_Event):
@@ -220,6 +224,34 @@ class Compaction(_Event):
     usage: UsageData
 
 
+class MaskedResult(_Frozen):
+    """One tool result as the model is shown it from here on: `seq` is its `tool_result` event."""
+
+    seq: int = Field(ge=1)
+    shown: str  # exactly what the model sees in its place
+
+
+class ToolResultsMasked(_Event):
+    """Old tool results replaced by a placeholder to keep the request small (design §6, V=2).
+    The results stay in the log; the projection shows `shown` in their place, so it adds
+    nothing (§4). `state` is lite-context's `ContextState`, so the next call cuts in the same
+    place and the request keeps its prefix."""
+
+    type: Literal["tool_results_masked"] = "tool_results_masked"
+    v: int = Field(default=2, ge=2, le=V)  # it did not exist at V=1
+    masked: tuple[MaskedResult, ...] = Field(min_length=1)
+    state: dict[str, Any]
+    tokens_before: int = Field(ge=0)  # lite-context's estimates for the request, before and after
+    tokens_after: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _each_once(self) -> Self:
+        seqs = [m.seq for m in self.masked]
+        if len(set(seqs)) != len(seqs):
+            raise ValueError("a masked event names each result once")
+        return self
+
+
 class ModelSwitched(_Event):
     """From here to the end of this run the calls go to another role (design §5 rule 11)."""
 
@@ -247,6 +279,7 @@ Event = Annotated[
     | Resumed
     | ModelErrorEvent
     | Compaction
+    | ToolResultsMasked
     | ModelSwitched
     | RunFinished,
     Field(discriminator="type"),

@@ -13,6 +13,7 @@ from lite_agent.compaction import Compactor
 from lite_agent.context import Memory, SkillSource, build
 from lite_agent.events import Event
 from lite_agent.gates import Gate
+from lite_agent.masking import Masker
 from lite_agent.result import Resume, RunResult
 from lite_agent.runner import InProcessRunner, Runner
 from lite_agent.store import InMemorySessionStore, SessionStore, new_id
@@ -45,6 +46,9 @@ class Agent:
     # summary (design §6). Without it nothing is summarised.
     compaction: Compactor | None = None
     compact_role: str = "compact"
+    # What shows old tool results as a placeholder before a call, with no model call (design §6,
+    # V=2). Runs before `compaction`. Without it every result is sent whole.
+    masking: Masker | None = None
     sessions: SessionStore = field(default_factory=InMemorySessionStore)
     budget: Budget = field(default_factory=Budget)
     runner: Runner = field(default_factory=InProcessRunner)
@@ -68,8 +72,11 @@ class Agent:
         if repeated:
             raise ValueError(f"tool names must be unique: {', '.join(repeated)}")
         object.__setattr__(self, "gates", tuple(self.gates))
+        roles = [r for r in (self.role, self.fallback_role) if r is not None]
         if self.compaction is not None:
-            self.compaction.check([r for r in (self.role, self.fallback_role) if r is not None])
+            self.compaction.check(roles)
+        if self.masking is not None:
+            self.masking.check(roles)
 
     def system_prompt(self) -> str:
         """The system prompt every run of this agent is opened with: the host's, then what

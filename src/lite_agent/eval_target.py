@@ -16,6 +16,7 @@ from lite_model.testing import AsyncFakeModel
 
 import lite_agent
 from lite_agent.evals.tasks import BY_ID, SYSTEM, TASKS, Task, run_task, say
+from lite_agent.masking import ToolResultMasker
 
 if TYPE_CHECKING:
     from lite_eval.datasets.local import Dataset
@@ -49,12 +50,17 @@ class AgentTarget:
         model: str = "fake",
         reasoning_effort: Effort = "none",
         temperature: float | None = None,
+        mask_at: int | None = None,
+        mask_keep: int = 2,
     ) -> None:
         self.backend = backend
         self.model = model
         self.reasoning_effort = reasoning_effort
         # None: lite-model's default for the backend (0.0 for Ollama: greedy, what a host gets)
         self.temperature = temperature
+        # Estimated tokens past which old tool results are masked (design §6); None: off
+        self.mask_at = mask_at
+        self.mask_keep = mask_keep  # the newest batches of results always shown whole
         self._live: AsyncToolModel | None = None
 
     @property
@@ -67,6 +73,12 @@ class AgentTarget:
             "model": self.model,
             "reasoning_effort": self.reasoning_effort,
             "temperature": self.temperature,
+            # only when masking is on: results without it keep the identity they always had
+            **(
+                {"mask_at": self.mask_at, "mask_keep": self.mask_keep}
+                if self.mask_at is not None
+                else {}
+            ),
         }
 
     def versions(self) -> dict[str, str]:
@@ -104,7 +116,12 @@ class AgentTarget:
     async def run(self, case: Case) -> Output:
         assert isinstance(case.input, dict)
         task = BY_ID[str(case.input["task"])]
-        run = await run_task(task, self._model(task))
+        masking = (
+            ToolResultMasker(context_tokens={"agent": self.mask_at}, keep_last=self.mask_keep)
+            if self.mask_at is not None
+            else None
+        )
+        run = await run_task(task, self._model(task), masking=masking)
         m = run.metrics
         spans = [Span(kind="event", name=e.type, attrs={"seq": e.seq}) for e in run.events]
         usage = Usage(input_tokens=m.input_tokens, output_tokens=m.output_tokens)
@@ -120,9 +137,11 @@ def agent(
     model: str = "fake",
     reasoning_effort: Effort = "none",
     temperature: float | None = None,
+    mask_at: int | None = None,
+    mask_keep: int = 2,
 ) -> AgentTarget:
     """The suites' entry point (`python: lite_agent.eval_target:agent`)."""
-    return AgentTarget(backend, model, reasoning_effort, temperature)
+    return AgentTarget(backend, model, reasoning_effort, temperature, mask_at, mask_keep)
 
 
 __all__ = ["SYSTEM", "TASKS", "AgentTarget", "agent"]

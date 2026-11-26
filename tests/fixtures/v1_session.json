@@ -1,0 +1,575 @@
+{
+ "events": [
+  {
+   "run_id": "id2",
+   "seq": 1,
+   "session_id": "id1",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "session_started",
+   "v": 1
+  },
+  {
+   "fallback_role": null,
+   "role": "agent",
+   "run_id": "id2",
+   "seq": 2,
+   "session_id": "id1",
+   "system": "You are terse.",
+   "time": "2026-11-21T12:00:00Z",
+   "tools": [
+    {
+     "description": "The search tool.",
+     "name": "search",
+     "parameters": {
+      "type": "object"
+     }
+    },
+    {
+     "description": "The fetch tool.",
+     "name": "fetch",
+     "parameters": {
+      "type": "object"
+     }
+    },
+    {
+     "description": "The broken tool.",
+     "name": "broken",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   ],
+   "type": "run_started",
+   "v": 1
+  },
+  {
+   "origin": "task",
+   "run_id": "id2",
+   "seq": 3,
+   "session_id": "id1",
+   "text": "Find heron-7.",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "user_message",
+   "v": 1
+  },
+  {
+   "blocks": [
+    {
+     "data": {
+      "signature": "sig/AbC+123==",
+      "thinking": "",
+      "type": "thinking"
+     },
+     "kind": "opaque",
+     "protocol": "anthropic"
+    },
+    {
+     "arguments": {
+      "q": "heron"
+     },
+     "id": "c1",
+     "kind": "tool_call",
+     "name": "search",
+     "raw_arguments": null
+    },
+    {
+     "arguments": {
+      "id": 7
+     },
+     "id": "c2",
+     "kind": "tool_call",
+     "name": "fetch",
+     "raw_arguments": null
+    }
+   ],
+   "provenance": {
+    "answered": "fake-model",
+    "backend": "fake",
+    "channel": "local",
+    "requested": "fake-model",
+    "role": "agent",
+    "routed": false,
+    "via": {}
+   },
+   "role": "agent",
+   "run_id": "id2",
+   "seq": 4,
+   "session_id": "id1",
+   "stop": "tool_calls",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "model_turn",
+   "usage": {
+    "cost_usd": null,
+    "input": null,
+    "output": null,
+    "reasoning": null
+   },
+   "v": 1
+  },
+  {
+   "arguments": {
+    "q": "heron"
+   },
+   "call_id": "c1",
+   "external": false,
+   "name": "search",
+   "run_id": "id2",
+   "seq": 5,
+   "session_id": "id1",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "tool_started",
+   "v": 1
+  },
+  {
+   "call_id": "c1",
+   "content": "found rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+   "error_kind": null,
+   "executed": true,
+   "is_error": false,
+   "origin": "executed",
+   "original_chars": 306,
+   "run_id": "id2",
+   "seq": 6,
+   "session_id": "id1",
+   "terminal": false,
+   "time": "2026-11-21T12:00:00Z",
+   "type": "tool_result",
+   "v": 1
+  },
+  {
+   "arguments": {
+    "id": 7
+   },
+   "call_id": "c2",
+   "external": false,
+   "name": "fetch",
+   "run_id": "id2",
+   "seq": 7,
+   "session_id": "id1",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "tool_started",
+   "v": 1
+  },
+  {
+   "call_id": "c2",
+   "content": "page pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp",
+   "error_kind": null,
+   "executed": true,
+   "is_error": false,
+   "origin": "executed",
+   "original_chars": 305,
+   "run_id": "id2",
+   "seq": 8,
+   "session_id": "id1",
+   "terminal": false,
+   "time": "2026-11-21T12:00:00Z",
+   "type": "tool_result",
+   "v": 1
+  },
+  {
+   "blocks": [
+    {
+     "arguments": {},
+     "id": "c3",
+     "kind": "tool_call",
+     "name": "broken",
+     "raw_arguments": null
+    }
+   ],
+   "provenance": {
+    "answered": "fake-model",
+    "backend": "fake",
+    "channel": "local",
+    "requested": "fake-model",
+    "role": "agent",
+    "routed": false,
+    "via": {}
+   },
+   "role": "agent",
+   "run_id": "id2",
+   "seq": 9,
+   "session_id": "id1",
+   "stop": "tool_calls",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "model_turn",
+   "usage": {
+    "cost_usd": null,
+    "input": null,
+    "output": null,
+    "reasoning": null
+   },
+   "v": 1
+  },
+  {
+   "arguments": {},
+   "call_id": "c3",
+   "external": false,
+   "name": "broken",
+   "run_id": "id2",
+   "seq": 10,
+   "session_id": "id1",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "tool_started",
+   "v": 1
+  },
+  {
+   "call_id": "c3",
+   "content": "RuntimeError: boom",
+   "error_kind": "exception",
+   "executed": true,
+   "is_error": true,
+   "origin": "executed",
+   "original_chars": 18,
+   "run_id": "id2",
+   "seq": 11,
+   "session_id": "id1",
+   "terminal": false,
+   "time": "2026-11-21T12:00:00Z",
+   "type": "tool_result",
+   "v": 1
+  },
+  {
+   "blocks": [
+    {
+     "kind": "text",
+     "text": "Heron-7 runs on port 8431."
+    }
+   ],
+   "provenance": {
+    "answered": "fake-model",
+    "backend": "fake",
+    "channel": "local",
+    "requested": "fake-model",
+    "role": "agent",
+    "routed": false,
+    "via": {}
+   },
+   "role": "agent",
+   "run_id": "id2",
+   "seq": 12,
+   "session_id": "id1",
+   "stop": "end",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "model_turn",
+   "usage": {
+    "cost_usd": null,
+    "input": null,
+    "output": null,
+    "reasoning": null
+   },
+   "v": 1
+  },
+  {
+   "outcome": "completed",
+   "run_id": "id2",
+   "seq": 13,
+   "session_id": "id1",
+   "stop": "end_turn",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "run_finished",
+   "usage": {
+    "cost_usd": null,
+    "input": null,
+    "output": null,
+    "reasoning": null
+   },
+   "v": 1
+  },
+  {
+   "fallback_role": null,
+   "role": "agent",
+   "run_id": "id3",
+   "seq": 14,
+   "session_id": "id1",
+   "system": "You are terse.",
+   "time": "2026-11-21T12:00:00Z",
+   "tools": [
+    {
+     "description": "The search tool.",
+     "name": "search",
+     "parameters": {
+      "type": "object"
+     }
+    },
+    {
+     "description": "The fetch tool.",
+     "name": "fetch",
+     "parameters": {
+      "type": "object"
+     }
+    },
+    {
+     "description": "The broken tool.",
+     "name": "broken",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   ],
+   "type": "run_started",
+   "v": 1
+  },
+  {
+   "origin": "task",
+   "run_id": "id3",
+   "seq": 15,
+   "session_id": "id1",
+   "text": "Check the port.",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "user_message",
+   "v": 1
+  },
+  {
+   "blocks": [
+    {
+     "arguments": {
+      "q": "port"
+     },
+     "id": "c4",
+     "kind": "tool_call",
+     "name": "search",
+     "raw_arguments": null
+    }
+   ],
+   "provenance": {
+    "answered": "fake-model",
+    "backend": "fake",
+    "channel": "local",
+    "requested": "fake-model",
+    "role": "agent",
+    "routed": false,
+    "via": {}
+   },
+   "role": "agent",
+   "run_id": "id3",
+   "seq": 16,
+   "session_id": "id1",
+   "stop": "tool_calls",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "model_turn",
+   "usage": {
+    "cost_usd": null,
+    "input": null,
+    "output": null,
+    "reasoning": null
+   },
+   "v": 1
+  },
+  {
+   "arguments": {
+    "q": "port"
+   },
+   "call_id": "c4",
+   "external": false,
+   "name": "search",
+   "run_id": "id3",
+   "seq": 17,
+   "session_id": "id1",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "tool_started",
+   "v": 1
+  },
+  {
+   "call_id": "c4",
+   "content": "found rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+   "error_kind": null,
+   "executed": true,
+   "is_error": false,
+   "origin": "executed",
+   "original_chars": 306,
+   "run_id": "id3",
+   "seq": 18,
+   "session_id": "id1",
+   "terminal": false,
+   "time": "2026-11-21T12:00:00Z",
+   "type": "tool_result",
+   "v": 1
+  },
+  {
+   "covers": [
+    3,
+    11
+   ],
+   "provenance": {
+    "answered": "fake-model",
+    "backend": "fake",
+    "channel": "local",
+    "requested": "fake-model",
+    "role": "compact",
+    "routed": false,
+    "via": {}
+   },
+   "role": "compact",
+   "run_id": "id3",
+   "seq": 19,
+   "session_id": "id1",
+   "summary": "This conversation is long, so its earlier part was replaced by the summary below, written from that part of the conversation. It reports what was said and done; it is not a new request. What follows the summary is the conversation as it continued.\n\nThey looked up heron-7 twice.",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "compaction",
+   "usage": {
+    "cost_usd": null,
+    "input": null,
+    "output": null,
+    "reasoning": null
+   },
+   "v": 1
+  },
+  {
+   "blocks": [
+    {
+     "kind": "text",
+     "text": "Still 8431."
+    }
+   ],
+   "provenance": {
+    "answered": "fake-model",
+    "backend": "fake",
+    "channel": "local",
+    "requested": "fake-model",
+    "role": "agent",
+    "routed": false,
+    "via": {}
+   },
+   "role": "agent",
+   "run_id": "id3",
+   "seq": 20,
+   "session_id": "id1",
+   "stop": "end",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "model_turn",
+   "usage": {
+    "cost_usd": null,
+    "input": null,
+    "output": null,
+    "reasoning": null
+   },
+   "v": 1
+  },
+  {
+   "outcome": "completed",
+   "run_id": "id3",
+   "seq": 21,
+   "session_id": "id1",
+   "stop": "end_turn",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "run_finished",
+   "usage": {
+    "cost_usd": null,
+    "input": null,
+    "output": null,
+    "reasoning": null
+   },
+   "v": 1
+  },
+  {
+   "fallback_role": null,
+   "role": "agent",
+   "run_id": "id4",
+   "seq": 22,
+   "session_id": "id1",
+   "system": "You are terse.",
+   "time": "2026-11-21T12:00:00Z",
+   "tools": [
+    {
+     "description": "The search tool.",
+     "name": "search",
+     "parameters": {
+      "type": "object"
+     }
+    },
+    {
+     "description": "The fetch tool.",
+     "name": "fetch",
+     "parameters": {
+      "type": "object"
+     }
+    },
+    {
+     "description": "The broken tool.",
+     "name": "broken",
+     "parameters": {
+      "type": "object"
+     }
+    }
+   ],
+   "type": "run_started",
+   "v": 1
+  },
+  {
+   "origin": "task",
+   "run_id": "id4",
+   "seq": 23,
+   "session_id": "id1",
+   "text": "Anything else?",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "user_message",
+   "v": 1
+  },
+  {
+   "blocks": [
+    {
+     "kind": "text",
+     "text": "Done."
+    }
+   ],
+   "provenance": {
+    "answered": "fake-model",
+    "backend": "fake",
+    "channel": "local",
+    "requested": "fake-model",
+    "role": "agent",
+    "routed": false,
+    "via": {}
+   },
+   "role": "agent",
+   "run_id": "id4",
+   "seq": 24,
+   "session_id": "id1",
+   "stop": "end",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "model_turn",
+   "usage": {
+    "cost_usd": null,
+    "input": null,
+    "output": null,
+    "reasoning": null
+   },
+   "v": 1
+  },
+  {
+   "outcome": "completed",
+   "run_id": "id4",
+   "seq": 25,
+   "session_id": "id1",
+   "stop": "end_turn",
+   "time": "2026-11-21T12:00:00Z",
+   "type": "run_finished",
+   "usage": {
+    "cost_usd": null,
+    "input": null,
+    "output": null,
+    "reasoning": null
+   },
+   "v": 1
+  }
+ ],
+ "note": "Captured from lite-agent v0.2.5 (event vocabulary V=1) before V=2; never edit.",
+ "projection": {
+  "messages": [
+   "Message(role='system', content='You are terse.')",
+   "Message(role='user', content='This conversation is long, so its earlier part was replaced by the summary below, written from that part of the conversation. It reports what was said and done; it is not a new request. What follows the summary is the conversation as it continued.\\n\\nThey looked up heron-7 twice.')",
+   "AssistantTurn(blocks=(Text(text='Heron-7 runs on port 8431.'),))",
+   "Message(role='user', content='Check the port.')",
+   "AssistantTurn(blocks=(ToolCall(id='c4', name='search', arguments={'q': 'port'}, raw_arguments=None),))",
+   "ToolResults(results=(ToolResult(call_id='c4', content='found rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr', is_error=False),))",
+   "AssistantTurn(blocks=(Text(text='Still 8431.'),))",
+   "Message(role='user', content='Anything else?')",
+   "AssistantTurn(blocks=(Text(text='Done.'),))"
+  ],
+  "tools": [
+   "ToolSpec(name='search', description='The search tool.', parameters={'type': 'object'})",
+   "ToolSpec(name='fetch', description='The fetch tool.', parameters={'type': 'object'})",
+   "ToolSpec(name='broken', description='The broken tool.', parameters={'type': 'object'})"
+  ]
+ }
+}

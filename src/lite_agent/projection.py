@@ -14,6 +14,7 @@ from lite_agent.events import (
     RunStarted,
     ToolCallBlock,
     ToolResultEvent,
+    ToolResultsMasked,
     ToolStarted,
     UserMessage,
     Waiting,
@@ -95,21 +96,46 @@ def latest_compaction(events: Sequence[Event]) -> Compaction | None:
     return next((e for e in reversed(events) if isinstance(e, Compaction)), None)
 
 
-def history(events: Sequence[Event]) -> tuple[TurnMessage, ...]:
+@dataclass(frozen=True)
+class Shown:
+    """One message of the history, with what it was made from: `key` names it for lite-context
+    (`e<seq>` of its event, or `summary`), `results` the seqs of the `tool_result` events a
+    `ToolResults` holds, in its order."""
+
+    message: TurnMessage
+    key: str
+    results: tuple[int, ...] = ()
+
+
+def masks(events: Sequence[Event]) -> dict[int, str]:
+    """What each masked tool result is shown as, by its seq (every `tool_results_masked`)."""
+    return {m.seq: m.shown for e in events if isinstance(e, ToolResultsMasked) for m in e.masked}
+
+
+def keyed_history(events: Sequence[Event], *, masked: bool = True) -> list[Shown]:
     """The conversation as the model is shown it, without the system prompt. The latest
     compaction's summary stands for every event it covers (a later compaction takes in an
     earlier one's summary, so only the latest counts); every result of one turn's calls becomes
-    one `ToolResults`, in the calls' order."""
+    one `ToolResults`, in the calls' order. A result a `tool_results_masked` event names shows
+    the text that event recorded, unless `masked` is False (what the masker measures)."""
     opaque_from = _opaque_from(events)
     summary = latest_compaction(events)
     covered = summary.covers[1] if summary is not None else 0
-    shown: list[TurnMessage] = [Message("user", summary.summary)] if summary is not None else []
+    replaced = masks(events) if masked else {}
+    shown: list[Shown] = (
+        [Shown(Message("user", summary.summary), "summary")] if summary is not None else []
+    )
     calls: list[str] = []  # the open turn's call ids, in order
-    results: dict[str, ToolResult] = {}
+    results: dict[str, tuple[ToolResult, int]] = {}
 
     def close_turn() -> None:
         if results:
-            shown.append(ToolResults(tuple(results[c] for c in calls if c in results)))
+            kept = [results[c] for c in calls if c in results]
+            seqs = tuple(seq for _, seq in kept)
+            # keyed by its first result; results that answer none of the turn's calls still
+            # close it with an empty batch, as before V=2
+            first = seqs[0] if seqs else min(seq for _, seq in results.values())
+            shown.append(Shown(ToolResults(tuple(r for r, _ in kept)), f"e{first}", seqs))
         calls.clear()
         results.clear()
 
@@ -118,15 +144,21 @@ def history(events: Sequence[Event]) -> tuple[TurnMessage, ...]:
             continue
         if isinstance(e, UserMessage):
             close_turn()
-            shown.append(Message("user", e.text))
+            shown.append(Shown(Message("user", e.text), f"e{e.seq}"))
         elif isinstance(e, ModelTurn):
             close_turn()
-            shown.append(turn_of(e.blocks, opaque=e.seq >= opaque_from))
+            shown.append(Shown(turn_of(e.blocks, opaque=e.seq >= opaque_from), f"e{e.seq}"))
             calls += [b.id for b in e.blocks if isinstance(b, ToolCallBlock)]
         elif isinstance(e, ToolResultEvent):
-            results[e.call_id] = ToolResult(e.call_id, e.content, e.is_error)
+            content = replaced.get(e.seq, e.content)
+            results[e.call_id] = (ToolResult(e.call_id, content, e.is_error), e.seq)
     close_turn()
-    return tuple(shown)
+    return shown
+
+
+def history(events: Sequence[Event]) -> tuple[TurnMessage, ...]:
+    """The conversation as the model is shown it, without the system prompt (`keyed_history`)."""
+    return tuple(s.message for s in keyed_history(events))
 
 
 def derive(events: Sequence[Event]) -> Projection:

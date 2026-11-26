@@ -13,7 +13,10 @@ from lite_agent.events import EVENT_TYPES, V
 
 # One fingerprint per vocabulary version. Changing an event's shape: bump V in events.py, keep
 # reading the old version, and add the new version's fingerprint below; never edit an old one.
-FROZEN = {1: "f35f152a1fd02b1b"}  # v0.1.0, 2026-11-21
+FROZEN = {
+    1: "f35f152a1fd02b1b",
+    2: "506737d964eb32f6",
+}  # v0.1.0, 2026-11-21; V=2: tool_results_masked
 
 
 def fingerprint() -> str:

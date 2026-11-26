@@ -1,0 +1,17 @@
+# Masking (design §6, V=2) on local Ollama, rule 13's before and after: qwen3:8b greedy (the S5b
+# baseline's main config) with masking off, then on at 900 estimated tokens keeping the newest
+# batch (where masking engages on these tasks, measured on the fake). Three runs per task.
+# Free but slow: check nothing else is evaluating on Ollama first (`pgrep -fl lite-eval`).
+#   uv run lite-eval run eval/lite-eval/suites/agent-ollama-masking.yaml
+name: agent-ollama-masking
+dataset: ../datasets/agent
+repeats: 3
+timeout_s: 600
+concurrency: 1
+targets:
+  - python: lite_agent.eval_target:agent
+    configs:
+      - {name: qwen3-8b, backend: ollama, model: "qwen3:8b", reasoning_effort: none}
+      - {name: qwen3-8b-masked, backend: ollama, model: "qwen3:8b", reasoning_effort: none, mask_at: 900, mask_keep: 1}
+scorers:
+  - exact_match: {field: done, expected: done}

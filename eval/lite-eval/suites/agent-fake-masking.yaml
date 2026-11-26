@@ -1,0 +1,12 @@
+# Masking (design §6, V=2) on lite-model's fake: the same scripted tasks with old tool results
+# masked past 900 estimated tokens, keeping the newest batch (measured: masking engages on
+# skill-zh and long-en, 7 results). Deterministic; compare with agent-fake.yaml (rule 13).
+#   uv run lite-eval run eval/lite-eval/suites/agent-fake-masking.yaml
+name: agent-fake-masking
+dataset: ../datasets/agent
+targets:
+  - python: lite_agent.eval_target:agent
+    configs:
+      - {name: fake-masked, backend: fake, model: fake, mask_at: 900, mask_keep: 1}
+scorers:
+  - exact_match: {field: done, expected: done}

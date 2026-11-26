@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 # through: loaded once outside the sandbox, not again for every workflow run.
 SANDBOX = SandboxedWorkflowRunner(
     restrictions=SandboxRestrictions.default.with_passthrough_modules(
-        "lite_agent", "lite_model", "pydantic", "pydantic_core"
+        "lite_agent", "lite_model", "lite_context", "pydantic", "pydantic_core"
     )
 )
 
