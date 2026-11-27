@@ -1,7 +1,7 @@
-"""S5b timings (design §16 "投影的开销", S4a's note on one recursive CTE): how long `derive()`
-takes on a session of N events, and how long the PostgreSQL store's tail read (what the run does
-before every request) and full read (what it does when a run starts) take, on a plain session
-and at the end of a fork chain. Not a test and not in CI.
+"""S5b timings (design §16 "Cost of the projection", S4a's note on one recursive CTE): how long
+`derive()` takes on a session of N events, and how long the PostgreSQL store's tail read (what
+the run does before every request) and full read (what it does when a run starts) take, on a
+plain session and at the end of a fork chain. Not a test and not in CI.
 
     uv run --env-file .env python scripts/bench_projection.py
 
