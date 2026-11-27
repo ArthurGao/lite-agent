@@ -1711,6 +1711,23 @@ Every stage closes with step 4 of the AGENTS.md Workflow: `/simplify`, then a re
   - **Boundary**: this covers only the large output produced while the agent runs. The original text of knowledge
     documents belongs to the ingestion flow of lite-rag / llm-steward, and business files uploaded by users belong to
     the host. No separate repo (KB `global/llm-app-architecture.md` §13.11).
+- **A summary is never checked on resume** (2026-11-27, no host need yet, not scheduled): resume checks tool calls
+  (a call with `tool_started` and no result is re-run only if idempotent, else `reconcile`), but nothing checks
+  whether the latest `compaction` summary is still faithful to the events it covers. A fact the summary dropped or
+  got wrong (a number, an id, an open item marked done) carries into every later turn unnoticed. The S3b and
+  masking evals measure only that earlier facts survive one compaction, not drift across several compactions and
+  resumes. Possible shape: an optional check after writing a `compaction` event that asks the compact role (or a
+  code check for names, numbers and paths, as in KB `global/llm-app-architecture.md` §13.9) whether each such token
+  in the covered events appears in the summary, and rewrites the summary once if not. The raw events stay in the
+  log, so a bad summary can always be replaced by a new `compaction` event. Measure drift on a long-task eval with
+  several compactions before building it (AGENTS.md rule 13).
+- **No explicit output reserve** (2026-11-27): `SummaryCompactor(context_tokens={role: n})` compares the estimated
+  request with `n`; the room for the reply is whatever the host left between `n` and the model's window. A host
+  that sets `n` close to the window gets a request that fits but a reply cut short. Option: when the role's
+  lite-model config sets `max_output_tokens`, the compactor subtracts it from the threshold (or `Agent` refuses a
+  threshold above window minus that cap, if the window is known). Needs a decision on where the window size comes
+  from: lite-model has no per-model window today. Until then, the rule for hosts: set `n` to the window minus the
+  role's `max_output_tokens` minus a margin for the estimate (characters ÷ 3.5 is not a count).
 - **Parallel tools**: whether several calls in the same turn run in parallel; when parallel, the result events are
   written in call order.
 - **Calls that cost money but did not enter the log**: when the model has replied but `append` fails (an ordinary
